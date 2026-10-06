@@ -1,0 +1,11 @@
+image,expected_label
+test_01.png,normal
+test_02.png,bearing_wear
+test_03.png,bearing_wear
+test_04.png,structural_crack
+test_05.png,corrosion
+test_06.png,corrosion
+test_07.png,bearing_wear
+test_08.png,structural_crack
+test_09.png,normal
+test_10.png,normal
