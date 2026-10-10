@@ -6,7 +6,7 @@ from uuid import UUID
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from .config import Settings, get_settings
@@ -20,6 +20,15 @@ ALLOWED_CONTENT_TYPES = {
     "image/jpeg", "image/png", "image/webp",
     "application/pdf", "text/plain", "text/csv", "application/json",
 }
+
+
+class DefectReportIn(BaseModel):
+    """What the vision step (Titus) reports about a case. The agent turns it into a diagnosis."""
+
+    defect_type: str = Field(min_length=1)
+    location: str = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+    image_ref: Optional[str] = None
 
 
 def build_repo(settings: Settings):
@@ -87,6 +96,25 @@ def create_app(settings: Optional[Settings] = None, repo=None, evolus=None) -> F
     @app.post("/cases/{case_id}/diagnosis")
     def attach_diagnosis(case_id: UUID, body: DiagnosisIn):
         return service.attach_diagnosis(str(case_id), body)
+
+    @app.post("/cases/{case_id}/diagnose")
+    async def diagnose_case(case_id: UUID, body: DefectReportIn):
+        """Run the AI agent on a defect report and store its diagnosis on the case.
+        The case stays 'pending': a human still has to approve or reject it."""
+        case = repo.get_case(str(case_id))
+        if case is None:
+            raise CaseNotFound(f"Case {case_id} not found")
+        if case["status"] != CaseStatus.PENDING.value:
+            raise InvalidTransition(f"Only pending cases can be diagnosed (this one is '{case['status']}')")
+        try:
+            from agent import diagnose  # imported here so the API still starts without the AI packages/keys
+        except Exception as exc:
+            raise HTTPException(503, f"AI agent is not available: {exc}")
+        try:
+            result = await run_in_threadpool(diagnose, body.model_dump())
+        except Exception as exc:
+            raise HTTPException(502, f"AI agent failed: {exc}")
+        return await run_in_threadpool(service.attach_diagnosis, str(case_id), DiagnosisIn(**result))
 
     @app.post("/cases/{case_id}/approve")
     def approve_case(case_id: UUID, body: ApproveIn):
