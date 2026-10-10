@@ -1007,28 +1007,76 @@ These limitations should be updated as features become functional.
 
 ## 21. Contribution and Git Workflow
 
-The frontend is maintained on the `rowza-frontend` feature branch.
+All team members are welcome to contribute to the project. The `main` branch is the shared integration branch. Team members should coordinate their changes to avoid conflicts and keep the project up to date.
 
-Typical workflow:
+### 21.1 Contributing to the Main Branch
+
+If you are already working on `main`, update your local branch before making changes:
 
 ```bash
-git fetch origin
+git pull --ff-only origin main
+```
+
+If you are on another branch and intend to contribute directly to `main`, switch to `main` first:
+
+```bash
+git switch main
+git pull --ff-only origin main
+```
+
+After making your changes, review, commit, and push them:
+
+```bash
+git status
+git add <files-you-changed>
+git commit -m "feat: describe your change"
+git push origin main
+```
+
+Replace `<files-you-changed>` with the paths of the files you want to commit.
+
+**Important:** Coordinate with the team before pushing directly to `main`. If direct pushes are restricted or the team prefers pull requests, push your changes to a feature branch and open a pull request targeting `main`.
+
+### 21.2 Contributing Through the Frontend Branch
+
+Team members who want to contribute specifically to the frontend can work on the `rowza-frontend` branch.
+
+If you are already on `rowza-frontend`, update it with:
+
+```bash
+git pull --ff-only origin rowza-frontend
+```
+
+If you are on another branch, switch to `rowza-frontend` first:
+
+```bash
+git switch rowza-frontend
+git pull --ff-only origin rowza-frontend
+```
+
+After making frontend changes, review, commit, and push them:
+
+```bash
 git status
 git add frontend/
 git commit -m "feat(frontend): describe the change"
 git push origin rowza-frontend
 ```
 
-Before creating a pull request:
+If your changes include files outside `frontend/`, stage those files explicitly as well. Do not commit `.env.local`, credentials, or other files containing secrets.
 
-1. Review the staged files.
-2. Confirm that no environment secrets are included.
-3. Run the relevant tests and production build.
-4. Push the feature branch.
-5. Create a pull request targeting the agreed integration branch.
-6. Request review before merging.
+Coordinate with the team to integrate frontend changes into `main` through the agreed review and merge process.
 
-Coordinate backend changes with the backend maintainer rather than independently modifying backend-owned files.
+### 21.3 Contribution Guidelines
+
+Before pushing or opening a pull request:
+
+1. Review the changed and staged files.
+2. Ensure no secrets or unintended local files are included.
+3. Run relevant tests and the production build.
+4. Use clear, descriptive commit messages.
+5. Coordinate with the relevant team member before modifying code owned by another contributor.
+6. Review and test integrated changes to help prevent regressions.
 
 ---
 
