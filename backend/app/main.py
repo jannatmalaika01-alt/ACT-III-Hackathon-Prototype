@@ -1,12 +1,15 @@
 """FastAPI app.   Run:  uvicorn app.main:create_app --factory --reload"""
 from __future__ import annotations
 
+import logging
+import sys
+from pathlib import Path
 from typing import Optional
 from uuid import UUID
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
 from fastapi.responses import JSONResponse
-from pydantic import ValidationError
+from pydantic import BaseModel, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from .config import Settings, get_settings
@@ -16,10 +19,28 @@ from .models import ApproveIn, CaseStatus, DiagnosisIn, RejectIn, WebhookIn
 from .security import verify_signature
 from .service import CaseNotFound, CaseNotReady, CaseService, InvalidTransition
 
+log = logging.getLogger("main")
+
+# agent.py / core.py live in backend/ (one level above this app/ package). Put that folder on the import
+# path so `from agent import ...` works however the server is started, not only from inside backend/.
+_BACKEND_DIR = str(Path(__file__).resolve().parents[1])
+if _BACKEND_DIR not in sys.path:
+    sys.path.insert(0, _BACKEND_DIR)
+
 ALLOWED_CONTENT_TYPES = {
     "image/jpeg", "image/png", "image/webp",
     "application/pdf", "text/plain", "text/csv", "application/json",
 }
+
+
+class DefectReportIn(BaseModel):
+    """What the vision step (Titus) reports about a case. The agent turns it into a diagnosis."""
+
+    defect_type: str = Field(min_length=1)
+    location: str = Field(min_length=1)
+    confidence: float = Field(ge=0, le=1)
+    image_ref: Optional[str] = None
+    rejection_feedback: Optional[str] = None  # optional: a reviewer's reason, so the agent proposes something different
 
 
 def build_repo(settings: Settings):
@@ -87,6 +108,31 @@ def create_app(settings: Optional[Settings] = None, repo=None, evolus=None) -> F
     @app.post("/cases/{case_id}/diagnosis")
     def attach_diagnosis(case_id: UUID, body: DiagnosisIn):
         return service.attach_diagnosis(str(case_id), body)
+
+    @app.post("/cases/{case_id}/diagnose")
+    async def diagnose_case(case_id: UUID, body: DefectReportIn):
+        """Run the AI agent on a defect report and store its diagnosis on the case.
+        The case stays 'pending': a human still has to approve or reject it."""
+        case = repo.get_case(str(case_id))
+        if case is None:
+            raise CaseNotFound(f"Case {case_id} not found")
+        if case["status"] != CaseStatus.PENDING.value:
+            raise InvalidTransition(f"Only pending cases can be diagnosed (this one is '{case['status']}')")
+        try:
+            from agent import diagnose, NoRelevantSOPError  # lazy: the API still starts without the AI packages/keys
+        except Exception:
+            log.exception("could not import the AI agent")
+            raise HTTPException(503, "AI agent is not available.")
+        report = body.model_dump(exclude={"rejection_feedback"})
+        try:
+            result = await run_in_threadpool(diagnose, report, body.rejection_feedback)
+        except NoRelevantSOPError:
+            log.warning("no relevant SOP found for case %s", case_id)
+            raise HTTPException(422, "No relevant SOP was found for this defect, so no cited diagnosis could be made.")
+        except Exception:
+            log.exception("AI diagnosis failed for case %s", case_id)  # full details stay in the server log
+            raise HTTPException(502, "AI diagnosis failed.")
+        return await run_in_threadpool(service.attach_diagnosis, str(case_id), DiagnosisIn(**result))
 
     @app.post("/cases/{case_id}/approve")
     def approve_case(case_id: UUID, body: ApproveIn):
