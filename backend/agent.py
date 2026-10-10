@@ -18,6 +18,11 @@ LOW_CONFIDENCE_THRESHOLD = 0.70
 VALID_SEVERITIES = ("low", "medium", "high", "critical")
 
 
+class NoRelevantSOPError(Exception):
+    """No SOP excerpt was found for this defect. The backend requires a manual + page citation
+    for every diagnosis, so we refuse to make one up; the API reports this as a controlled error."""
+
+
 class AgentState(TypedDict, total=False):
     defect_report: dict
     rejection_feedback: Optional[str]
@@ -57,11 +62,19 @@ def receive_defect(state: AgentState) -> dict:
 def retrieve_context(state: AgentState) -> dict:
     defect = state["defect_report"]
     query = f"{defect['defect_type']} at {defect['location']}"
-    return {"retrieved_docs": retrieve(query)}
+    docs = retrieve(query)
+    if not docs:
+        # Stop BEFORE the LLM is called: without a source there is nothing to cite.
+        raise NoRelevantSOPError(f"No SOP found for '{query}'")
+    return {"retrieved_docs": docs}
 
 
 def low_confidence(state: AgentState) -> dict:
-    """Detection itself is doubtful: skip the LLM and ask a human to verify the detection first."""
+    """Detection itself is doubtful: skip the LLM and ask a human to verify the detection first.
+
+    The backend's severity field has no 'unverified' value, so severity is a PLACEHOLDER ("medium").
+    That is made explicit in two places: the explanation starts with "UNVERIFIED", and the stored raw
+    JSON has needs_manual_verification=True and severity_verified=False."""
     defect = state["defect_report"]
     top = state["retrieved_docs"][0]
     ref = f" (image {defect['image_ref']})" if defect.get("image_ref") else ""
@@ -71,6 +84,7 @@ def low_confidence(state: AgentState) -> dict:
             "defect": f"{defect['defect_type']} at {defect['location']}",
             "severity": "medium",
             "explanation": (
+                f"UNVERIFIED DETECTION (severity is a placeholder, not assessed). "
                 f"Detection confidence {defect['confidence']} is below the "
                 f"{LOW_CONFIDENCE_THRESHOLD} threshold, so this may be a false positive."
             ),
@@ -148,6 +162,7 @@ def finalize(state: AgentState) -> dict:
     diagnosis["raw"] = {
         "defect_report": defect,
         "needs_manual_verification": state.get("needs_review", False),
+        "severity_verified": not state.get("needs_review", False),
         "retrieved": [{"manual": d["manual"], "page": d["page"]} for d in state["retrieved_docs"]],
         "rejection_feedback": state.get("rejection_feedback"),
         "llm_output": state.get("llm_output"),
