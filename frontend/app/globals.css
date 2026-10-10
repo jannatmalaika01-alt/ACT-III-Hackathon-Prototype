@@ -1,0 +1,87 @@
+@import "tailwindcss";
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+@keyframes scan {
+  from {
+    top: 0;
+  }
+  to {
+    top: 100%;
+  }
+}
+
+html {
+  color-scheme: dark;
+}
+body {
+  background:
+    radial-gradient(1200px 600px at 80% -10%, #0e2a3a55, transparent), #070b14;
+  color: #e2e8f0;
+  font-family:
+    ui-sans-serif,
+    system-ui,
+    -apple-system,
+    "Segoe UI",
+    Roboto,
+    sans-serif;
+}
+
+.card {
+  background: rgb(255 255 255 / 0.04);
+  border: 1px solid rgb(255 255 255 / 0.09);
+  border-radius: 1rem;
+}
+.animate-fade-up {
+  animation: fade-up 0.4s ease both;
+}
+.skeleton {
+  background: linear-gradient(
+    90deg,
+    #ffffff08 25%,
+    #ffffff14 50%,
+    #ffffff08 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s infinite;
+  border-radius: 0.5rem;
+}
+.scan-line {
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: linear-gradient(90deg, transparent, #22d3ee, transparent);
+  box-shadow: 0 0 14px #22d3ee;
+  animation: scan 1.6s ease-in-out infinite alternate;
+}
+
+/* TEMPORARY CSS TEST — remove after verification */
+body::after {
+  content: "CSS IS LOADING";
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  z-index: 99999;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: #16a34a;
+  color: white;
+  font-size: 14px;
+}
