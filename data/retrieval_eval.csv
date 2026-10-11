@@ -1,0 +1,16 @@
+question,expected_source,expected_page
+How do I replace a worn bearing and what grease should be used?,bearing_maintenance_manual.pdf,2
+What should I do when a bearing housing is above 95 C and the grease has burnt?,bearing_maintenance_manual.pdf,3
+What torque and temperature are used when installing a replacement bearing?,bearing_maintenance_manual.pdf,4
+How is a structural crack on a welded support seam repaired?,structural_inspection_sop.pdf,2
+How do I verify a weld repair with dye penetrant or magnetic particle testing?,structural_inspection_sop.pdf,3
+Who signs off a structure for re-commissioning after crack repair?,structural_inspection_sop.pdf,4
+How do I treat rust and brown oxide flakes on metallic piping?,corrosion_control_guide.pdf,2
+What to do when pipe wall loss exceeds 20 percent of nominal thickness?,corrosion_control_guide.pdf,3
+How often should sacrificial anodes be checked?,corrosion_control_guide.pdf,4
+What torque for re-tightening a loose M16 bolt?,fastener_alignment_sop.pdf,2
+The conveyor belt is drifting to one side and shafts are misaligned. What now?,fastener_alignment_sop.pdf,3
+What vibration level in mm/s counts as an alarm for a rotating machine?,condition_monitoring_guide.pdf,1
+When is bearing temperature a warning versus an alarm and how is thermography used?,condition_monitoring_guide.pdf,2
+How is ultrasonic wall thickness monitoring scheduled?,condition_monitoring_guide.pdf,3
+How often should critical load-bearing joints be inspected during structural audits?,structural_inspection_sop.pdf,1

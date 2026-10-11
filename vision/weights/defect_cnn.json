@@ -1,0 +1,12 @@
+{
+  "classes": [
+    "normal",
+    "bearing_wear",
+    "structural_crack",
+    "corrosion"
+  ],
+  "val_accuracy": 0.995,
+  "train_images": 2800,
+  "real_photos": 0,
+  "trained_on": "synthetic only"
+}

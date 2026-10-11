@@ -1,0 +1,26 @@
+{
+  "embedder": "tfidf",
+  "detection": {
+    "image": {
+      "correct": 20,
+      "total": 20
+    },
+    "sensor": {
+      "correct": 4,
+      "total": 4
+    },
+    "document": {
+      "correct": 5,
+      "total": 5
+    }
+  },
+  "retrieval": {
+    "top1": 14,
+    "top3": 15,
+    "total": 15
+  },
+  "end_to_end": {
+    "correct": 21,
+    "total": 21
+  }
+}
