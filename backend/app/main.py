@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Optional
@@ -31,6 +32,15 @@ ALLOWED_CONTENT_TYPES = {
     "image/jpeg", "image/png", "image/webp",
     "application/pdf", "text/plain", "text/csv", "application/json",
 }
+
+# SIMULATED vision output, used by /analyze until Titus's real detector exists.
+# Same shape as the real defect report. Remove the fallback when the detector is connected.
+SIMULATED_DEFECTS = [
+    {"defect_type": "crack", "location": "weld joint A3", "confidence": 0.91, "image_ref": "img_014.png"},
+    {"defect_type": "corrosion", "location": "pipe section B7", "confidence": 0.78, "image_ref": "img_022.png"},
+    {"defect_type": "misalignment", "location": "conveyor belt C2", "confidence": 0.65, "image_ref": "img_031.png"},
+    {"defect_type": "loose_bolt", "location": "panel D5", "confidence": 0.95, "image_ref": "img_040.png"},
+]
 
 
 class DefectReportIn(BaseModel):
@@ -76,10 +86,47 @@ def create_app(settings: Optional[Settings] = None, repo=None, evolus=None) -> F
     async def _not_ready(_: Request, exc: CaseNotReady):
         return JSONResponse(status_code=409, content={"detail": str(exc)})
 
+    # ---- shared by /diagnose and /analyze ----
+    async def _run_agent(case_id: UUID, report: dict, feedback: Optional[str], source: Optional[str]):
+        """Run the AI agent on a defect report and store its diagnosis on the case.
+        `source` ("simulated" / "vision") is saved in diagnosis_raw.defect_source; None leaves raw untouched."""
+        case = repo.get_case(str(case_id))
+        if case is None:
+            raise CaseNotFound(f"Case {case_id} not found")
+        if case["status"] != CaseStatus.PENDING.value:
+            raise InvalidTransition(f"Only pending cases can be diagnosed (this one is '{case['status']}')")
+        try:
+            from agent import diagnose, NoRelevantSOPError  # lazy: the API still starts without the AI packages/keys
+        except Exception:
+            log.exception("could not import the AI agent")
+            raise HTTPException(503, "AI agent is not available.")
+        try:
+            result = await run_in_threadpool(diagnose, report, feedback)
+        except NoRelevantSOPError:
+            log.warning("no relevant SOP found for case %s", case_id)
+            raise HTTPException(422, "No relevant SOP was found for this defect, so no cited diagnosis could be made.")
+        except Exception:
+            log.exception("AI diagnosis failed for case %s", case_id)  # full details stay in the server log
+            raise HTTPException(502, "AI diagnosis failed.")
+        if source is not None:
+            raw = dict(result.get("raw") or {})
+            raw["defect_source"] = source
+            result = {**result, "raw": raw}
+        return await run_in_threadpool(service.attach_diagnosis, str(case_id), DiagnosisIn(**result))
+
     # ---- routes ----
     @app.get("/health")
     def health():
-        return {"status": "ok", "evolus_mode": settings.evolus_mode, "in_memory_db": settings.use_memory_db}
+        return {
+            "status": "ok",
+            "evolus_mode": settings.evolus_mode,
+            "in_memory_db": settings.use_memory_db,
+            # shown by the frontend; the detector is simulated until Titus's vision model is connected
+            "analyzer_mode": "simulated",
+            "reasoner": os.environ.get("LLM_MODEL", "openai/gpt-oss-120b"),
+            "llm_provider": "groq",
+            "detector": "simulated",
+        }
 
     @app.post("/cases", status_code=201)
     async def upload_case(file: UploadFile = File(...), uploaded_by: str = Form("unknown")):
@@ -113,26 +160,20 @@ def create_app(settings: Optional[Settings] = None, repo=None, evolus=None) -> F
     async def diagnose_case(case_id: UUID, body: DefectReportIn):
         """Run the AI agent on a defect report and store its diagnosis on the case.
         The case stays 'pending': a human still has to approve or reject it."""
-        case = repo.get_case(str(case_id))
-        if case is None:
-            raise CaseNotFound(f"Case {case_id} not found")
-        if case["status"] != CaseStatus.PENDING.value:
-            raise InvalidTransition(f"Only pending cases can be diagnosed (this one is '{case['status']}')")
-        try:
-            from agent import diagnose, NoRelevantSOPError  # lazy: the API still starts without the AI packages/keys
-        except Exception:
-            log.exception("could not import the AI agent")
-            raise HTTPException(503, "AI agent is not available.")
         report = body.model_dump(exclude={"rejection_feedback"})
-        try:
-            result = await run_in_threadpool(diagnose, report, body.rejection_feedback)
-        except NoRelevantSOPError:
-            log.warning("no relevant SOP found for case %s", case_id)
-            raise HTTPException(422, "No relevant SOP was found for this defect, so no cited diagnosis could be made.")
-        except Exception:
-            log.exception("AI diagnosis failed for case %s", case_id)  # full details stay in the server log
-            raise HTTPException(502, "AI diagnosis failed.")
-        return await run_in_threadpool(service.attach_diagnosis, str(case_id), DiagnosisIn(**result))
+        return await _run_agent(case_id, report, body.rejection_feedback, None)
+
+    @app.post("/cases/{case_id}/analyze")
+    async def analyze_case(case_id: UUID, body: Optional[DefectReportIn] = None):
+        """One call after upload: get a defect report, run the agent, store the diagnosis.
+        - No body: uses a clearly labelled SIMULATED defect (diagnosis_raw.defect_source = "simulated").
+        - With a body (Titus's real detector output): uses it (defect_source = "vision").
+        The case stays 'pending' until a human approves or rejects it."""
+        if body is not None:
+            report = body.model_dump(exclude={"rejection_feedback"})
+            return await _run_agent(case_id, report, body.rejection_feedback, "vision")
+        report = dict(SIMULATED_DEFECTS[case_id.int % len(SIMULATED_DEFECTS)])
+        return await _run_agent(case_id, report, None, "simulated")
 
     @app.post("/cases/{case_id}/approve")
     def approve_case(case_id: UUID, body: ApproveIn):
