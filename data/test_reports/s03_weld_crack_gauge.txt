@@ -1,0 +1,2 @@
+sensor: crack gauge W3
+crack_width_mm: 1.3

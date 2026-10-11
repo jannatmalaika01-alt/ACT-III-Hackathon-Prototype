@@ -1,0 +1,10 @@
+file,input_type,expected_label
+s01_motor_vibration.csv,sensor,bearing_wear
+s02_pipe_wall.json,sensor,corrosion
+s03_weld_crack_gauge.txt,sensor,structural_crack
+s04_healthy_pump.csv,sensor,normal
+d01_shift_report.txt,document,bearing_wear
+d02_pipe_inspection.txt,document,corrosion
+d03_clean_audit.txt,document,normal
+d04_weld_report.pdf,document,structural_crack
+d05_scanned_crack_report.pdf,document,structural_crack

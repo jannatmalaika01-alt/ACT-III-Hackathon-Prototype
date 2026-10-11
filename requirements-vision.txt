@@ -1,0 +1,13 @@
+# Vision + knowledge modules (separate from backend/requirements.txt so nothing there changes)
+numpy>=1.26
+pillow>=10.1
+pypdf>=4.0
+torch>=2.2
+# optional but recommended
+sentence-transformers>=2.7   # semantic embeddings (all-MiniLM-L6-v2); falls back to TF-IDF if missing / offline
+pytesseract>=0.3.10          # OCR for scanned PDFs; also needs the Tesseract program installed
+pypdfium2>=4.30              # renders scanned pages for OCR
+# only to regenerate data / run tests
+reportlab>=4.0
+pytest>=8.0
+httpx>=0.27
