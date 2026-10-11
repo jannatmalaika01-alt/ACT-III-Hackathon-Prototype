@@ -1,18 +1,28 @@
 -- =====================================================================
 -- AI Factory Quality & Maintenance Agent - database schema
 -- Run in: Supabase Dashboard -> SQL Editor -> New query -> Run
+--
+-- SAFE TO RUN MORE THAN ONCE: every statement is "create if not exists"
+-- (or guarded), so a second run changes nothing and does not error.
+-- It never drops or renames anything, so existing data is kept.
 -- =====================================================================
 
--- ---------- Enums ----------
-create type public.case_status as enum
-  ('pending', 'approved', 'rejected', 'task_created', 'task_failed');
+-- ---------- Enums (guarded: Postgres has no "create type if not exists") ----------
+do $$ begin
+  create type public.case_status as enum
+    ('pending', 'approved', 'rejected', 'task_created', 'task_failed');
+exception when duplicate_object then null; end $$;
 
-create type public.approval_decision as enum ('approved', 'rejected');
+do $$ begin
+  create type public.approval_decision as enum ('approved', 'rejected');
+exception when duplicate_object then null; end $$;
 
-create type public.severity_level as enum ('low', 'medium', 'high', 'critical');
+do $$ begin
+  create type public.severity_level as enum ('low', 'medium', 'high', 'critical');
+exception when duplicate_object then null; end $$;
 
 -- ---------- cases ----------
-create table public.cases (
+create table if not exists public.cases (
   id                 uuid primary key default gen_random_uuid(),
   status             public.case_status not null default 'pending',
 
@@ -23,6 +33,7 @@ create table public.cases (
   uploaded_by        text,
 
   -- diagnosis (filled in by the AI pipeline after upload)
+  -- NOTE: the agent endpoint writes these exact column names - do not rename them.
   defect             text,
   severity           public.severity_level,
   explanation        text,
@@ -48,10 +59,10 @@ create table public.cases (
     check (status <> 'task_failed' or task_error is not null)
 );
 
-create index cases_status_created_idx on public.cases (status, created_at desc);
+create index if not exists cases_status_created_idx on public.cases (status, created_at desc);
 
 -- ---------- approvals (one final human decision per case) ----------
-create table public.approvals (
+create table if not exists public.approvals (
   id          uuid primary key default gen_random_uuid(),
   case_id     uuid not null references public.cases(id) on delete cascade,
   decision    public.approval_decision not null,
@@ -63,10 +74,10 @@ create table public.approvals (
     check (decision <> 'rejected' or (reason is not null and length(trim(reason)) > 0))
 );
 
-create unique index approvals_one_decision_per_case on public.approvals (case_id);
+create unique index if not exists approvals_one_decision_per_case on public.approvals (case_id);
 
 -- ---------- case_events (audit trail + webhook de-duplication) ----------
-create table public.case_events (
+create table if not exists public.case_events (
   id           bigint generated always as identity primary key,
   case_id      uuid not null references public.cases(id) on delete cascade,
   event_id     text unique,                  -- webhook event id; NULL for internal events
@@ -77,7 +88,7 @@ create table public.case_events (
   created_at   timestamptz not null default now()
 );
 
-create index case_events_case_idx on public.case_events (case_id, created_at);
+create index if not exists case_events_case_idx on public.case_events (case_id, created_at);
 
 -- ---------- keep updated_at fresh ----------
 create or replace function public.set_updated_at()
@@ -87,6 +98,7 @@ begin
   return new;
 end $$;
 
+drop trigger if exists cases_set_updated_at on public.cases;
 create trigger cases_set_updated_at
   before update on public.cases
   for each row execute function public.set_updated_at();
