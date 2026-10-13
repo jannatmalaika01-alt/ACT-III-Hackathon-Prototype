@@ -4,6 +4,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+import threading
 from pathlib import Path
 from typing import Optional
 from uuid import UUID
@@ -28,19 +29,79 @@ _BACKEND_DIR = str(Path(__file__).resolve().parents[1])
 if _BACKEND_DIR not in sys.path:
     sys.path.insert(0, _BACKEND_DIR)
 
+# vision/ and knowledge/ live at the repo root (two levels above this file). Add it so
+# `from knowledge.pipeline import ...` works.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+# Local copy of each uploaded file, so the vision pipeline can read it from disk.
+UPLOAD_CACHE = Path(os.environ.get("UPLOAD_CACHE_DIR", Path(_BACKEND_DIR) / ".upload_cache"))
+DEFAULT_LOCATION = "location not specified in upload"
+
 ALLOWED_CONTENT_TYPES = {
     "image/jpeg", "image/png", "image/webp",
     "application/pdf", "text/plain", "text/csv", "application/json",
 }
 
-# SIMULATED vision output, used by /analyze until Titus's real detector exists.
-# Same shape as the real defect report. Remove the fallback when the detector is connected.
+# SIMULATED vision output. Used by /analyze ONLY as a fallback when the real detector can't run
+# (for example the uploaded file is no longer cached after a server restart). It is always labelled
+# defect_source = "simulated" so it is never passed off as a real detection.
 SIMULATED_DEFECTS = [
     {"defect_type": "crack", "location": "weld joint A3", "confidence": 0.91, "image_ref": "img_014.png"},
     {"defect_type": "corrosion", "location": "pipe section B7", "confidence": 0.78, "image_ref": "img_022.png"},
     {"defect_type": "misalignment", "location": "conveyor belt C2", "confidence": 0.65, "image_ref": "img_031.png"},
     {"defect_type": "loose_bolt", "location": "panel D5", "confidence": 0.95, "image_ref": "img_040.png"},
 ]
+
+# ---- real vision pipeline (loaded once, on first use: it loads torch + the embedding model) ----
+_pipeline = None
+_pipeline_lock = threading.Lock()
+
+
+def _get_pipeline():
+    global _pipeline
+    if _pipeline is None:
+        with _pipeline_lock:
+            if _pipeline is None:
+                from knowledge.pipeline import VisionKnowledgePipeline
+                _pipeline = VisionKnowledgePipeline()
+    return _pipeline
+
+
+def _cache_upload(case_id: str, filename: Optional[str], data: bytes) -> None:
+    """Keep a local copy of the upload (named <case_id><ext>) for the vision pipeline. Never raises."""
+    try:
+        ext = os.path.splitext(filename or "")[1].lower()[:10]
+        folder = UPLOAD_CACHE / case_id
+        folder.mkdir(parents=True, exist_ok=True)
+        (folder / f"{case_id}{ext}").write_bytes(data)
+    except Exception:
+        log.exception("could not cache upload for case %s", case_id)
+
+
+def _find_cached(case_id: str) -> Optional[Path]:
+    folder = UPLOAD_CACHE / case_id
+    if not folder.is_dir():
+        return None
+    files = sorted(p for p in folder.iterdir() if p.is_file())
+    return files[0] if files else None
+
+
+def _detect_report(case_id: str, location: Optional[str]) -> Optional[dict]:
+    """Run the real detector on the cached upload. Returns a defect report, or None if no cached file."""
+    path = _find_cached(case_id)
+    if path is None:
+        return None
+    contract = _get_pipeline().process_case(str(path), case_id=case_id)
+    defect = contract["defect"]
+    confidence = max(0.0, min(1.0, float(defect["confidence"])))
+    return {
+        "defect_type": defect["type"],
+        "location": location or DEFAULT_LOCATION,
+        "confidence": confidence,
+        "image_ref": path.name,
+    }
 
 
 class DefectReportIn(BaseModel):
@@ -117,15 +178,17 @@ def create_app(settings: Optional[Settings] = None, repo=None, evolus=None) -> F
     # ---- routes ----
     @app.get("/health")
     def health():
+        weights = _REPO_ROOT / "vision" / "weights" / "defect_cnn.pt"
+        real_detector = weights.is_file()
         return {
             "status": "ok",
             "evolus_mode": settings.evolus_mode,
             "in_memory_db": settings.use_memory_db,
-            # shown by the frontend; the detector is simulated until Titus's vision model is connected
-            "analyzer_mode": "simulated",
+            # shown by the frontend
+            "analyzer_mode": "vision" if real_detector else "simulated",
             "reasoner": os.environ.get("LLM_MODEL", "openai/gpt-oss-120b"),
-            "llm_provider": "groq",
-            "detector": "simulated",
+            "llm_provider": os.environ.get("LLM_PROVIDER", "groq"),
+            "detector": "defect_cnn" if real_detector else "simulated",
         }
 
     @app.post("/cases", status_code=201)
@@ -138,9 +201,11 @@ def create_app(settings: Optional[Settings] = None, repo=None, evolus=None) -> F
             raise HTTPException(413, f"File is larger than {settings.max_upload_mb} MB")
         if not data:
             raise HTTPException(400, "Empty file")
-        return await run_in_threadpool(
+        case = await run_in_threadpool(
             service.create_case, data, file.filename or "upload", file.content_type, uploaded_by
         )
+        _cache_upload(str(case["id"]), file.filename, data)
+        return case
 
     @app.get("/cases")
     def list_cases(status: Optional[CaseStatus] = None,
@@ -164,14 +229,27 @@ def create_app(settings: Optional[Settings] = None, repo=None, evolus=None) -> F
         return await _run_agent(case_id, report, body.rejection_feedback, None)
 
     @app.post("/cases/{case_id}/analyze")
-    async def analyze_case(case_id: UUID, body: Optional[DefectReportIn] = None):
+    async def analyze_case(case_id: UUID, body: Optional[DefectReportIn] = None,
+                           location: Optional[str] = Query(None)):
         """One call after upload: get a defect report, run the agent, store the diagnosis.
-        - No body: uses a clearly labelled SIMULATED defect (diagnosis_raw.defect_source = "simulated").
-        - With a body (Titus's real detector output): uses it (defect_source = "vision").
-        The case stays 'pending' until a human approves or rejects it."""
+        - With a body: uses it as the defect report (defect_source = "vision").
+        - No body: runs the real vision detector on the uploaded file (defect_source = "vision").
+          If that is impossible (file not cached, detector error) it falls back to a clearly
+          labelled SIMULATED defect (defect_source = "simulated").
+        Optional ?location= names where the defect is. The case stays 'pending' until a human decides."""
         if body is not None:
             report = body.model_dump(exclude={"rejection_feedback"})
             return await _run_agent(case_id, report, body.rejection_feedback, "vision")
+
+        report = None
+        try:
+            report = await run_in_threadpool(_detect_report, str(case_id), location)
+        except Exception:
+            log.exception("vision detection failed for case %s; using the simulated fallback", case_id)
+        if report is not None:
+            return await _run_agent(case_id, report, None, "vision")
+
+        log.warning("no cached upload for case %s; using the simulated fallback", case_id)
         report = dict(SIMULATED_DEFECTS[case_id.int % len(SIMULATED_DEFECTS)])
         return await _run_agent(case_id, report, None, "simulated")
 
