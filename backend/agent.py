@@ -10,8 +10,10 @@ Use from code:   from agent import diagnose;  diagnose({"defect_type": ..., "loc
 Try it:          python agent.py
 """
 import json
+import re
 from typing import TypedDict, Optional
 from langgraph.graph import StateGraph, END
+import core
 from core import call_llm, retrieve, FAKE_DEFECTS
 
 LOW_CONFIDENCE_THRESHOLD = 0.70
@@ -29,6 +31,7 @@ class AgentState(TypedDict, total=False):
     retrieved_docs: list
     needs_review: bool
     llm_output: str
+    grounding: dict
     diagnosis: dict
 
 
@@ -51,6 +54,17 @@ def _clamp_confidence(value) -> float:
         return max(0.0, min(1.0, float(value)))
     except (TypeError, ValueError):
         return 0.0
+
+
+def _norm(text: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(text).lower()).strip()
+
+
+def _quote_in_source(quote, source_text: str) -> bool:
+    """True if the model's quoted evidence really appears in the retrieved excerpt (ignores case/punctuation).
+    Too-short quotes (< 4 words) don't count: they would match almost anything."""
+    q = _norm(quote or "")
+    return len(q.split()) >= 4 and q in _norm(source_text)
 
 
 # ---------------- Nodes ----------------
@@ -124,10 +138,15 @@ Based ONLY on these excerpts, explain what this defect means and propose one spe
 (e.g. "schedule inspection", "shut down line", "log and monitor").
 
 Reply with ONLY a JSON object, no other text:
-{{"explanation": "...", "recommended_action": "...", "severity": "low|medium|high|critical", "source_index": <number of the excerpt you relied on>}}"""
+{{"explanation": "...", "recommended_action": "...", "severity": "low|medium|high|critical", "source_index": <number of the excerpt you relied on>, "evidence_quote": "<5-25 words copied EXACTLY from that excerpt that support your action>"}}"""
 
     output = call_llm(prompt)
     data = _extract_json(output)
+    retried = False
+    if not data:  # model ignored the JSON format: ask once more before falling back
+        retried = True
+        output = call_llm(prompt + "\n\nYour last reply was not valid JSON. Reply with ONLY the JSON object.")
+        data = _extract_json(output)
 
     # The citation comes from the retrieved documents, never from free text, so it can't be invented.
     try:
@@ -140,8 +159,15 @@ Reply with ONLY a JSON object, no other text:
     if severity not in VALID_SEVERITIES:
         severity = "medium"
 
+    quote = str(data.get("evidence_quote") or "").strip()
     return {
         "llm_output": output,
+        "grounding": {
+            "evidence_quote": quote or None,
+            "evidence_quote_verified": _quote_in_source(quote, source["text"]),  # quote really is in the cited chunk
+            "json_retried": retried,
+            "json_valid": bool(data),
+        },
         "diagnosis": {
             "defect": f"{defect['defect_type']} at {defect['location']}",
             "severity": severity,
@@ -166,6 +192,9 @@ def finalize(state: AgentState) -> dict:
         "retrieved": [{"manual": d["manual"], "page": d["page"]} for d in state["retrieved_docs"]],
         "rejection_feedback": state.get("rejection_feedback"),
         "llm_output": state.get("llm_output"),
+        "grounding": state.get("grounding"),
+        # which model actually answered (None when the LLM was skipped, e.g. low confidence)
+        "llm": dict(getattr(core, "LAST_LLM", None) or {}) or None if state.get("llm_output") is not None else None,
     }
     return {"diagnosis": diagnosis}
 

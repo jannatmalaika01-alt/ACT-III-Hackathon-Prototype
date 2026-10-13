@@ -96,9 +96,14 @@ def test_analyze_agent_failure_is_502_and_hides_details(client, agent):
     assert "secret" not in r.text
 
 
+
 def test_health_reports_analyzer_fields(client):
+    from app import main
+
     body = client.get("/health").json()
+    real_detector = (main._REPO_ROOT / "vision" / "weights" / "defect_cnn.pt").is_file()
+
     assert body["status"] == "ok"
-    assert body["analyzer_mode"] == "simulated"
-    assert body["detector"] == "simulated"
+    assert body["analyzer_mode"] == ("vision" if real_detector else "simulated")
+    assert body["detector"] == ("defect_cnn" if real_detector else "simulated")
     assert body["llm_provider"] == "groq"
