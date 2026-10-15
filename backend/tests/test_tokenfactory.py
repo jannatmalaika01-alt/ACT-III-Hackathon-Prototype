@@ -58,12 +58,9 @@ def test_success_sends_token_factory_parameters(core):
     body = call["json"]
     assert body["reasoning_effort"] == "low" and body["max_tokens"] >= 1500 and body["temperature"] == 0.2
     assert [m["role"] for m in body["messages"]] == ["system", "user"]
-    rf = body["response_format"]
-    assert rf["type"] == "json_schema" and rf["json_schema"]["strict"] is True
-    schema = rf["json_schema"]["schema"]
-    assert set(schema["required"]) == {"explanation", "recommended_action", "severity", "source_index",
-                                       "evidence_quote"}
-    assert schema["properties"]["severity"]["enum"] == ["low", "medium", "high", "critical"]
+    # the live server rejects json_schema for MiMo (HTTP 400), so json_object is the default
+    assert body["response_format"] == {"type": "json_object"}
+    assert set(body) == {"model", "temperature", "messages", "reasoning_effort", "max_tokens", "response_format"}
     assert core.LAST_LLM == {"provider": "tokenfactory", "model": "MiMo-V2.6-Flash"}
 
 
@@ -162,3 +159,38 @@ def test_health_reports_the_provider_that_answered(client, core):
     core.call_llm("hi")
     h = client.get("/health").json()
     assert (h["llm_provider"], h["reasoner"], h["llm_answered"]) == ("tokenfactory", "MiMo-V2.6-Flash", True)
+
+
+def test_json_schema_is_opt_in_and_sent_strict(core, monkeypatch):
+    monkeypatch.setenv("TOKENFACTORY_JSON_SCHEMA", "true")
+    core.script = [FakeResp()]
+    core.call_llm("hi")
+    rf = core.calls[0]["json"]["response_format"]
+    assert rf["type"] == "json_schema" and rf["json_schema"]["strict"] is True
+    schema = rf["json_schema"]["schema"]
+    assert set(schema["required"]) == {"explanation", "recommended_action", "severity", "source_index",
+                                       "evidence_quote"}
+    assert schema["properties"]["severity"]["enum"] == ["low", "medium", "high", "critical"]
+
+
+def test_server_rejecting_json_schema_falls_back_to_json_object(core, monkeypatch):
+    """Regression: the live API answers 400 'Model MiMo-V2.6-Flash does not support JSON schema output mode'."""
+    monkeypatch.setenv("TOKENFACTORY_JSON_SCHEMA", "true")
+    bad = FakeResp(400)
+    bad.json = lambda: {"error": {"message": "Model MiMo-V2.6-Flash does not support JSON schema output mode"}}
+    core.script = [bad, FakeResp()]
+    assert json.loads(core.call_llm("hi")) == GOOD
+    assert core.calls[0]["json"]["response_format"]["type"] == "json_schema"
+    assert core.calls[1]["json"]["response_format"] == {"type": "json_object"}
+    assert core.sleeps == []  # a 400 is not retried with backoff
+
+
+def test_http_error_log_has_status_and_message_but_never_the_key(core, caplog):
+    bad = FakeResp(400)
+    bad.json = lambda: {"error": {"message": "unsupported parameter foo"}}
+    core.script = [bad]
+    with caplog.at_level("WARNING", logger="core"), pytest.raises(core.LLMUnavailableError) as e:
+        core.call_llm("hi")
+    assert "HTTP 400 unsupported parameter foo" in caplog.text
+    assert "unsupported parameter foo" in str(e.value)
+    assert "test-key-not-real" not in caplog.text + str(e.value)

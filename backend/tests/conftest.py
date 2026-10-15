@@ -8,6 +8,19 @@ from app.main import create_app
 
 SECRET = "test-secret"
 
+LLM_ENV = ("TOKENFACTORY_BASE_URL", "TOKENFACTORY_API_KEY", "TOKENFACTORY_MODEL", "TOKENFACTORY_JSON_SCHEMA",
+           "LOCAL_LLM_BASE_URL", "GROQ_API_KEY", "GEMINI_API_KEY")
+
+
+@pytest.fixture(autouse=True)
+def no_real_llm(monkeypatch):
+    """Tests must never reach a real LLM (it spends the team's shared quota): ignore backend/.env and clear
+    every provider variable. Tests that need a provider set their own (see test_tokenfactory.py)."""
+    import dotenv
+    monkeypatch.setattr(dotenv, "load_dotenv", lambda *a, **k: False)
+    for name in LLM_ENV:
+        monkeypatch.delenv(name, raising=False)
+
 
 @pytest.fixture
 def settings():

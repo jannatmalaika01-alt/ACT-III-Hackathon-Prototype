@@ -6,6 +6,8 @@ LLM: any OpenAI-compatible chat endpoint, tried in order (see _providers() below
 RAG: the REAL manuals in data/raw (Titus's knowledge/ package), CPU only. No hard-coded SOPs.
      (The shared Token Factory endpoints have no embeddings, so retrieval stays on the CPU.)
 """
+import json
+import logging
 import os
 import random
 import re
@@ -17,6 +19,8 @@ import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
+
+log = logging.getLogger("core")
 
 # repo root (one level above backend/) so `knowledge` can be imported however the server starts
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -30,7 +34,7 @@ if _ROOT not in sys.path:
 #   3. GROQ         = GROQ_API_KEY, optional LLM_MODEL.
 #   4. GEMINI       = GEMINI_API_KEY, optional GEMINI_MODEL.
 LLM_MODEL = os.getenv("LLM_MODEL", "openai/gpt-oss-120b")  # Groq model
-LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "60"))
+LLM_TIMEOUT = float(os.getenv("LLM_TIMEOUT", "120"))  # MiMo with thinking can take 20s+ per answer
 _THINK_RE = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 # Token Factory limits are shared by the whole team: 30 requests/min, 8 concurrent.
@@ -41,8 +45,9 @@ TF_MAX_WAIT = 60.0            # never sleep longer than this between retries
 _LLM_SLOTS = threading.BoundedSemaphore(int(os.getenv("LLM_MAX_CONCURRENT", "4")))
 _sleep = time.sleep           # tests replace this so they don't really wait
 
-# JSON the agent asks for. MiMo-V2.6-Flash is the only Token Factory chat model that accepts a strict
-# json_schema; every other model only accepts {"type": "json_object"}.
+# JSON the agent asks for. The docs say MiMo-V2.6-Flash accepts a strict json_schema, but the live server
+# answers 400 "does not support JSON schema output mode" (checked 2026-10-15), so {"type": "json_object"} is
+# the default. Set TOKENFACTORY_JSON_SCHEMA=true to try the schema again; a 400 then falls back to json_object.
 DIAGNOSIS_SCHEMA = {
     "type": "object",
     "properties": {
@@ -137,7 +142,12 @@ def _post_with_retries(p: dict, payload: dict):
         return r
 
 
-def _payload(p: dict, system: str, prompt: str, json_output: bool, max_tokens: int) -> dict:
+def _use_schema(p: dict) -> bool:
+    return _is_mimo(p["model"]) and os.getenv("TOKENFACTORY_JSON_SCHEMA", "").strip().lower() in ("1", "true", "yes")
+
+
+def _payload(p: dict, system: str, prompt: str, json_output: bool, max_tokens: int,
+             schema: bool = False) -> dict:
     payload = {"model": p["model"], "temperature": 0.2,
                # exactly one system message, at index 0, text-only content
                "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}]}
@@ -148,7 +158,7 @@ def _payload(p: dict, system: str, prompt: str, json_output: bool, max_tokens: i
             payload["response_format"] = (
                 {"type": "json_schema",
                  "json_schema": {"name": "diagnosis", "strict": True, "schema": DIAGNOSIS_SCHEMA}}
-                if _is_mimo(p["model"]) else {"type": "json_object"})
+                if schema else {"type": "json_object"})
     return payload
 
 
@@ -160,19 +170,40 @@ def _ask(p: dict, system: str, prompt: str, json_output: bool) -> tuple:
         if not p["base"]:
             raise LLMConfigError("TOKENFACTORY_BASE_URL is not set")
     max_tokens = TF_MAX_TOKENS
-    for _ in range(2):  # the second pass only happens when the answer was cut off by max_tokens
-        r = _post_with_retries(p, _payload(p, system, prompt, json_output, max_tokens))
+    schema = p["name"] == "tokenfactory" and json_output and _use_schema(p)
+    cut_off_retried = False
+    for _ in range(3):  # extra passes: answer cut off by max_tokens, or the server refused the json_schema
+        try:
+            r = _post_with_retries(p, _payload(p, system, prompt, json_output, max_tokens, schema))
+        except httpx.HTTPStatusError as exc:
+            if schema and exc.response.status_code == 400 and "schema" in _error_detail(exc.response).lower():
+                schema = False  # this model/server does not do json_schema: use json_object from now on
+                continue
+            raise
         body = r.json()
         choice = body["choices"][0]
         # message.content only: message.reasoning is the model's thinking and is ignored
         text = _THINK_RE.sub("", choice["message"].get("content") or "").strip()
         if text:
             return text, body.get("model") or p["model"]
-        if choice.get("finish_reason") == "length" and p["name"] == "tokenfactory":
+        if choice.get("finish_reason") == "length" and p["name"] == "tokenfactory" and not cut_off_retried:
+            cut_off_retried = True
             max_tokens *= 2  # thinking used the whole budget; retry once with more room
             continue
         break
     raise RuntimeError("empty answer")
+
+
+def _error_detail(resp) -> str:
+    """The error message from a failed response body, trimmed. Never includes the request."""
+    try:
+        body = resp.json()
+        err = body.get("error", body) if isinstance(body, dict) else body
+        msg = err.get("message") or err.get("detail") or err if isinstance(err, dict) else err
+        text = msg if isinstance(msg, str) else json.dumps(msg)
+    except Exception:
+        text = getattr(resp, "text", "") or ""
+    return " ".join(str(text).split())[:300]
 
 
 def call_llm(prompt: str, system: str = "You are a factory maintenance assistant.",
@@ -190,7 +221,10 @@ def call_llm(prompt: str, system: str = "You are a factory maintenance assistant
             errors.append(f"{p['name']}: {exc}")
             continue
         except httpx.HTTPStatusError as exc:
-            errors.append(f"{p['name']}: HTTP {exc.response.status_code}")
+            detail = _error_detail(exc.response)
+            # status + the server's own message only: never the key, the headers or the request body
+            log.warning("LLM provider %s failed: HTTP %s %s", p["name"], exc.response.status_code, detail)
+            errors.append(f"{p['name']}: HTTP {exc.response.status_code}" + (f" ({detail})" if detail else ""))
             continue
         except Exception as exc:  # try the next provider; never log the key
             errors.append(f"{p['name']}: {type(exc).__name__}")
