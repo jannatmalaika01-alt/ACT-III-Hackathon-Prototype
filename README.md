@@ -36,6 +36,38 @@ The project combines a web-based factory dashboard, a backend API, computer visi
 20. [Security Considerations](#20-security-considerations)
 21. [Contribution and Git Workflow](#21-contribution-and-git-workflow)
 
+## Run it
+
+**Environment** – copy `backend/.env.example` to `backend/.env` and fill it in (never commit it):
+
+| Variable | Purpose |
+|---|---|
+| `TOKENFACTORY_BASE_URL`, `TOKENFACTORY_API_KEY`, `TOKENFACTORY_MODEL` | AMD Token Factory (the agent's LLM; model defaults to `MiMo-V2.6-Flash`) |
+| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | database + file storage (or `USE_IN_MEMORY_DB=true` to run without) |
+| `WEBHOOK_SECRET` | signs Evolus status webhooks |
+| `EVOLUS_MODE` (`mock` default, or `rest`), `EVOLUS_API_KEY`, `EVOLUS_APPLICATION_ID`, `EVOLUS_WORKFLOW_ID` | real Evolus tasks |
+| optional `GROQ_API_KEY`, `GEMINI_API_KEY`, `LOCAL_LLM_BASE_URL` | LLM fallbacks, tried in that order after Token Factory |
+
+**Docker:** `docker compose up --build` → frontend http://localhost:3000, API docs http://localhost:8000/docs.
+
+**Without Docker:**
+```bash
+cd backend && python -m venv .venv && source .venv/bin/activate && pip install -r requirements.txt
+uvicorn app.main:create_app --factory --port 8000
+cd frontend && npm install && BACKEND_URL=http://localhost:8000 npm run dev   # NEXT_PUBLIC_USE_MOCK=false is the default
+```
+
+**Tests:** `cd backend && python -m pytest -q` (no network or API keys needed; the LLM and Evolus are mocked).
+Live checks: `PYTHONPATH=. python scripts/tokenfactory_check.py` (lists models, makes one chat call) and
+`PYTHONPATH=. python scripts/compare_models.py` (3-case dry run; `--full` for the whole comparison).
+
+**Which model:** the agent calls **AMD Token Factory** first (`MiMo-V2.6-Flash` by default, with a strict JSON schema;
+other models use `json_object`). The model that actually answered is shown in `/health` and in the app's sidebar.
+Shared limits: 30 requests/min, 8 concurrent – the client retries 429/502/503 with `Retry-After` and caps itself at 4
+concurrent calls. SOP retrieval stays on the CPU (Token Factory has no embeddings).
+
+---
+
 ---
 
 ## 1. Project Overview
