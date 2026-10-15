@@ -67,6 +67,13 @@ def test_success_sends_token_factory_parameters(core):
     assert core.LAST_LLM == {"provider": "tokenfactory", "model": "MiMo-V2.6-Flash"}
 
 
+def test_control_characters_in_the_key_are_removed(core, monkeypatch):
+    monkeypatch.setenv("TOKENFACTORY_API_KEY", "abc\x1bdef\n")  # pasted from a terminal
+    core.script = [FakeResp()]
+    core.call_llm("hi")
+    assert core.calls[0]["headers"]["Authorization"] == "Bearer abcdef"
+
+
 def test_other_models_use_json_object(core, monkeypatch):
     monkeypatch.setenv("TOKENFACTORY_MODEL", "Qwen3.8-27B")
     core.script = [FakeResp(model="Qwen3.8-27B")]

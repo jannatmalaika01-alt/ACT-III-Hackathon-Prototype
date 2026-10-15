@@ -69,11 +69,20 @@ class LLMConfigError(RuntimeError):
     """A provider is partly configured (for example the URL is set but the key is missing)."""
 
 
+_CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
+
+
+def _secret(name: str) -> str:
+    """An env value usable in an HTTP header. A key pasted from a terminal can carry an invisible
+    control character (for example ESC), which makes the server answer '400 Invalid HTTP request'."""
+    return _CONTROL_CHARS.sub("", os.getenv(name, "")).strip()
+
+
 def _providers() -> list:
     out = []
     if os.getenv("TOKENFACTORY_BASE_URL") or os.getenv("TOKENFACTORY_API_KEY"):
         out.append({"name": "tokenfactory", "base": os.getenv("TOKENFACTORY_BASE_URL", "").rstrip("/"),
-                    "key": os.getenv("TOKENFACTORY_API_KEY", ""),
+                    "key": _secret("TOKENFACTORY_API_KEY"),
                     "model": os.getenv("TOKENFACTORY_MODEL", "MiMo-V2.6-Flash")})
     if os.getenv("LOCAL_LLM_BASE_URL"):
         out.append({"name": "local-vllm", "base": os.environ["LOCAL_LLM_BASE_URL"].rstrip("/"),
