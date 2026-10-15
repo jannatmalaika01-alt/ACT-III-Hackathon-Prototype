@@ -32,6 +32,12 @@ class SupabaseRepo:
     def upload_file(self, path: str, data: bytes, content_type: str) -> None:
         self.client.storage.from_(self.bucket).upload(path, data, {"content-type": content_type})
 
+    def download_file(self, path: str) -> Optional[bytes]:
+        try:
+            return self.client.storage.from_(self.bucket).download(path)
+        except Exception:
+            return None
+
     # ---- cases ----
     def create_case(self, case_id: str, file_path: str, file_name: str,
                     content_type: str, uploaded_by: str) -> Dict[str, Any]:
@@ -100,6 +106,9 @@ class InMemoryRepo:
 
     def upload_file(self, path: str, data: bytes, content_type: str) -> None:
         self.files[path] = data
+
+    def download_file(self, path: str) -> Optional[bytes]:
+        return self.files.get(path)
 
     def create_case(self, case_id: str, file_path: str, file_name: str,
                     content_type: str, uploaded_by: str) -> Dict[str, Any]:
