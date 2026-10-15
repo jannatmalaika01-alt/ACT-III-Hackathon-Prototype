@@ -17,7 +17,7 @@ def test_summary_and_winner_prefer_grounding_over_speed():
     bad_fast = cm.summarize("fast", [row(latency=1, quote_verified=False), row(latency=1)])
     assert good_slow["quote"] == 100 and bad_fast["quote"] == 50
     assert cm.pick_winner([bad_fast, good_slow])["model"] == "slow"
-    assert "| slow | 2 | 100% | 100% | 100% | 9.0s | 0 | 0 |" in cm.table([good_slow])
+    assert "| slow | 2 | 100% | 100% | 100% | 9.0s / 9.0s | 0 | 0 |" in cm.table([good_slow])
 
 
 def test_retries_count_http_and_json():

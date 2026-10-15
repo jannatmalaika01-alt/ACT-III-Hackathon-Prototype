@@ -101,17 +101,19 @@ def summarize(model, rows):
     n = len(rows)
     pct = lambda k: 100.0 * sum(1 for r in rows if r[k]) / n  # noqa: E731
     return {"model": model, "n": n, "json": pct("json_valid"), "quote": pct("quote_verified"),
-            "manual": pct("manual_ok"), "latency": sum(r["latency"] for r in rows) / n,
+            "manual": pct("manual_ok"), "latency": sum(r["latency"] for r in rows) / n, "max_latency": max(r["latency"] for r in rows),
+            "rate_limited": sum(r["http_retries"] for r in rows),
+            "error_texts": sorted({r["error"] for r in rows if r["error"]}),
             "retries": sum(r["http_retries"] + r["json_retried"] for r in rows),
             "errors": sum(1 for r in rows if r["error"])}
 
 
 def table(summaries):
-    head = ("| Model | Cases | Valid JSON | Evidence quote verified | Correct manual cited | Avg latency | "
+    head = ("| Model | Cases | Valid JSON | Evidence quote verified | Correct manual cited | Avg / max latency | "
             "Retries (HTTP + JSON) | Errors |\n|---|---|---|---|---|---|---|---|\n")
     return head + "\n".join(
         f"| {s['model']} | {s['n']} | {s['json']:.0f}% | {s['quote']:.0f}% | {s['manual']:.0f}% | "
-        f"{s['latency']:.1f}s | {s['retries']} | {s['errors']} |" for s in summaries)
+        f"{s['latency']:.1f}s / {s['max_latency']:.1f}s | {s['retries']} | {s['errors']} |" for s in summaries)
 
 
 def pick_winner(summaries):
@@ -123,9 +125,11 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--models", nargs="+", default=DEFAULT_MODELS)
     ap.add_argument("--full", action="store_true", help="run every case (default is a 3-case dry run)")
+    ap.add_argument("--reasoning-effort", default="low", help="low (default) or none; sent to Token Factory")
     ap.add_argument("--out", default=str(REPO / "docs" / "model_comparison.md"))
     args = ap.parse_args()
 
+    os.environ["TOKENFACTORY_REASONING_EFFORT"] = args.reasoning_effort
     import core
     for name in ("LOCAL_LLM_BASE_URL", "GROQ_API_KEY", "GEMINI_API_KEY"):
         os.environ.pop(name, None)  # Token Factory only: no silent fallback to another provider
@@ -160,13 +164,13 @@ def main() -> int:
         md = ["# Token Factory model comparison", "",
               f"Run on {time.strftime('%Y-%m-%d')}: {len(cases)} cases per model ({pacer.requests} requests). "
               "The agent's real prompt and the real CPU retriever were used; confidence was set to 0.90 so every case "
-              "reaches the LLM. 'Evidence quote verified' means the quote the model gave really appears in the cited "
+              "reaches the LLM. reasoning_effort=" + args.reasoning_effort + ". 'Evidence quote verified' means the quote the model gave really appears in the cited "
               "manual chunk; 'correct manual' means the cited manual is the one that covers that defect.", "",
               table(summaries), "", f"**Recommended: {winner['model']}** (ranked by verified evidence, correct "
               "citation, valid JSON, then errors/retries and speed).", "", "## Failures", ""]
         for model, rows in details.items():
             bad = [r for r in rows if r["error"] or not (r["json_valid"] and r["quote_verified"] and r["manual_ok"])]
-            md.append(f"**{model}**: " + ("none" if not bad else ""))
+            md.append(f"**{model}** (reasoning_effort={args.reasoning_effort}): " + ("none" if not bad else ""))
             md += [f"- {r['case']}: " + (r["error"] or f"json={r['json_valid']} quote={r['quote_verified']} "
                                           f"manual={r['manual_ok']}") for r in bad]
             md.append("")

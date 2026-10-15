@@ -152,7 +152,7 @@ def _payload(p: dict, system: str, prompt: str, json_output: bool, max_tokens: i
                # exactly one system message, at index 0, text-only content
                "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}]}
     if p["name"] == "tokenfactory":
-        payload["reasoning_effort"] = "low"
+        payload["reasoning_effort"] = os.getenv("TOKENFACTORY_REASONING_EFFORT", "low").strip() or "low"
         payload["max_tokens"] = max_tokens
         if json_output:
             payload["response_format"] = (
