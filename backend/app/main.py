@@ -180,14 +180,21 @@ def create_app(settings: Optional[Settings] = None, repo=None, evolus=None) -> F
     def health():
         weights = _REPO_ROOT / "vision" / "weights" / "defect_cnn.pt"
         real_detector = weights.is_file()
+        try:
+            from core import llm_status
+            llm = llm_status()
+        except Exception:
+            llm = {"provider": None, "model": None, "answered": False}
         return {
             "status": "ok",
             "evolus_mode": settings.evolus_mode,
             "in_memory_db": settings.use_memory_db,
             # shown by the frontend
             "analyzer_mode": "vision" if real_detector else "simulated",
-            "reasoner": os.environ.get("LLM_MODEL", "openai/gpt-oss-120b"),
-            "llm_provider": os.environ.get("LLM_PROVIDER", "groq"),
+            # the provider/model that actually answered last (or the first configured one until then)
+            "reasoner": llm["model"],
+            "llm_provider": llm["provider"],
+            "llm_answered": llm["answered"],
             "detector": "defect_cnn" if real_detector else "simulated",
         }
 
