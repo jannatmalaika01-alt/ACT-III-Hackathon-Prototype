@@ -36,7 +36,7 @@ def enabled() -> bool:
 
 
 def vision_model() -> str:
-    return os.getenv("DUAL_VISION_MODEL", "Qwen3.8-27B").strip()
+    return os.getenv("DUAL_VISION_MODEL", "Qwen3.8-Flash-Next").strip()
 
 
 def _timeout() -> float:

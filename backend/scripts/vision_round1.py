@@ -83,13 +83,40 @@ def run_model(model: str, effort, rows, limit) -> dict:
     return {"model": model, "effort": effort, "stopped": state["stopped"], "results": results}
 
 
+def mop_up(rows, only) -> int:
+    """Re-ask once the images whose answer was lost to a rate limit (the server allows 20 requests/min per key)."""
+    lab.LIMITER = lab.Limiter(per_min=12, concurrent=2)
+    by_file = {r["file"]: r for r in rows}
+    for f in sorted((LAB / "round1").glob("*.json")):
+        if f.stem == "cnn" or (only and f.stem not in only):
+            continue
+        out = json.loads(f.read_text())
+        if out.get("stopped"):
+            print(f"{f.stem}: skipped (model was stopped)")
+            continue
+        todo = [by_file[k] for k, v in out["results"].items() if v.get("error") == "rate_limit"]
+        if not todo:
+            continue
+        redo = run_model(out["model"], out["effort"], todo, 0)["results"]
+        recovered = sum(1 for v in redo.values() if v["error"] is None)
+        out["results"].update(redo)
+        out["mop_up"] = {"retried": len(todo), "recovered": recovered}
+        f.write_text(json.dumps(out))
+        print(f"{f.stem}: retried {len(todo)} rate-limited answers, recovered {recovered}", flush=True)
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--models", nargs="*")
     ap.add_argument("--limit", type=int, default=0)
+    ap.add_argument("--retry-rate-limited", action="store_true",
+                    help="ONE extra pass over answers that failed with a rate limit (12 requests/min); no loops")
     args = ap.parse_args()
     rows = load_manifest()
     (LAB / "round1").mkdir(exist_ok=True)
+    if args.retry_rate_limited:
+        return mop_up(rows, args.models)
 
     (LAB / "round1" / "cnn.json").write_text(json.dumps({"model": "CNN", "results": run_cnn(rows)}))
     caps = [c for c in json.loads((LAB / "vision_models.json").read_text()) if c.get("sees_images") == "yes"]

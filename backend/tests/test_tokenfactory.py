@@ -108,7 +108,9 @@ def test_503_backs_off_with_jitter_and_gives_up_after_3_retries(core):
 
 
 def test_400_is_not_retried(core):
-    core.script = [FakeResp(400)]
+    bad = FakeResp(400)
+    bad.json = lambda: {"error": {"message": "bad request"}}
+    core.script = [bad]
     with pytest.raises(core.LLMUnavailableError):
         core.call_llm("hi")
     assert len(core.calls) == 1 and core.sleeps == []
@@ -194,3 +196,18 @@ def test_http_error_log_has_status_and_message_but_never_the_key(core, caplog):
     assert "HTTP 400 unsupported parameter foo" in caplog.text
     assert "unsupported parameter foo" in str(e.value)
     assert "test-key-not-real" not in caplog.text + str(e.value)
+
+
+def test_reasoning_effort_rejected_steps_down_none_low_omit(core, monkeypatch):
+    """MiniCPM-V-4.7-1B answers 422 'reasoning_effort: unknown variant none'; the next value is tried."""
+    monkeypatch.setenv("TOKENFACTORY_REASONING_EFFORT", "none")
+    rejects = []
+    for _ in range(2):
+        r = FakeResp(422)
+        r.json = lambda: {"error": {"message": "reasoning_effort: unknown variant"}}
+        rejects.append(r)
+    core.script = rejects + [FakeResp()]
+    assert json.loads(core.call_llm("hi")) == GOOD
+    sent = [c["json"].get("reasoning_effort", "omitted") for c in core.calls]
+    assert sent == ["none", "low", "omitted"]
+    assert core.sleeps == []
