@@ -1,10 +1,12 @@
-"""Compare four ways of combining the detectors (no app code is touched; the rules live here).
+"""Compare six ways of combining the detectors. The rules are the app's own (app/dual_detector.py decide_labels), so
+this replay and DUAL_MODE can never drift apart.
 
     0  CNN alone.
     A  Pair: CNN + Qwen3.8-Flash-Next. Disagree -> human review.
     B  Independent 3-way vote: CNN, Flash-Next, Gemma-4-31B-IT. 2-of-3 wins; a 3-way split -> human review.
     C  CNN always counts: like B, but if the two vision models agree with each other and OUTVOTE the CNN, the case
        goes to human review instead of being decided silently.
+    U  Unanimity: CNN, Flash-Next and Gemma. Automatic ONLY if all available detectors agree; any disagreement -> review.
     (also reported: the pair CNN + Gemma-4-31B-IT)
     A detector with no answer for an image is MISSING: with 2 voters left, agreement wins and disagreement -> review;
     with 1 left it answers alone (like single_detector in the app); with 0 the case goes to review.
@@ -29,6 +31,8 @@ from collections import Counter
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from app import dual_detector as dd  # noqa: E402  (the app's voting rules)
+
 REPO = Path(__file__).resolve().parents[2]
 LABELS = ("normal", "bearing_wear", "structural_crack", "corrosion")
 DETECTORS = ("cnn", "flash", "gemma")
@@ -39,55 +43,38 @@ SCHEMES = [  # key, title, detectors that must be called (parallel), extra API c
     ("A_gemma", "A' Pair: CNN + Gemma", ("cnn", "gemma"), 1),
     ("B", "B  3-way vote (2-of-3)", ("cnn", "flash", "gemma"), 2),
     ("C", "C  3-way vote, CNN outvoted -> review", ("cnn", "flash", "gemma"), 2),
+    ("U", "U  Unanimity (all must agree)", ("cnn", "flash", "gemma"), 2),
 ]
+MODE_OF = {"B": "vote", "C": "cnn_anchored", "U": "unanimous"}  # scheme -> app DUAL_MODE (A / A' are `pair`)
 DEFAULT_ANSWERS = REPO / "data" / "voting_answers.json"
 _sleep = time.sleep  # tests replace this
 
-DECISION_RULE = """Decision rule (fixed BEFORE the results were looked at):
- 1. The scheme with the fewest SILENT wrong answers wins.
- 2. If tied, the lower human-review rate wins.
- 3. B or C must beat A by at least 2-3 fewer silent wrong answers to justify 2 extra calls per upload and the extra complexity.
- 4. If it is unclear, keep A (the pair): it is simpler and already built."""
+DECISION_RULE = """Decision rule (written BEFORE any real-photo result was seen):
+ (a) The scheme with the fewest SILENT wrong answers wins.
+ (b) A scheme where the vision models outvote a CNN that was right is OUT, unless that case is flagged for a human
+     (the column 'CNN right but silently outvoted' must be 0).
+ (c) Among ties, the lowest human-review rate wins.
+ (d) Extra calls only matter if the average latency exceeds about 12 s or the slowest exceeds about 45 s.
+ (e) If the results are too close or too noisy with this few photos, KEEP `pair` (the default).
+ With 20-40 photos only LARGE differences can be seen; a gap of 1 to 3 photos is noise."""
 
 
-# ---------------- the voting rules (pure functions) ----------------
+# ---------------- the voting rules (the app's own) ----------------
 
 def decide(scheme: str, labels: dict) -> dict:
     """labels = {"cnn": label|None, "flash": label|None, "gemma": label|None}.
     Returns {"status": "auto"|"review", "label": label or None, "reason": str, "ref": label or None}.
     `ref` is the label used to judge a review: the CNN's label if it answered, else the leading label."""
-    cnn = labels.get("cnn")
+    cnn, flash, gemma = labels.get("cnn"), labels.get("flash"), labels.get("gemma")
     if scheme == "0":
-        return _out("auto", cnn, "cnn alone", cnn) if cnn else _out("review", None, "no answer", None)
-    if scheme in ("A", "A_gemma"):
-        present = [(k, labels.get(k)) for k in ("cnn", "flash" if scheme == "A" else "gemma") if labels.get(k)]
-        return _combine(present, cnn, three_way=False)
-    present = [(k, labels[k]) for k in DETECTORS if labels.get(k)]
-    return _combine(present, cnn, three_way=True, outvote_review=(scheme == "C"), labels=labels)
-
-
-def _out(status, label, reason, ref):
-    return {"status": status, "label": label, "reason": reason, "ref": ref}
-
-
-def _combine(present, cnn, three_way, outvote_review=False, labels=None):
-    names = [l for _, l in present]
-    if not present:
-        return _out("review", None, "no detector answered", None)
-    top, count = Counter(names).most_common(1)[0]
-    ref = cnn or top
-    if len(present) == 1:
-        return _out("auto", names[0], "single detector", ref)
-    if len(present) == 2:
-        if names[0] == names[1]:
-            return _out("auto", top, "agree", ref)
-        return _out("review", None, "disagree", ref)
-    # three voters
-    if count == 1:
-        return _out("review", None, "3-way split", ref)
-    if outvote_review and cnn != top:
-        return _out("review", None, "CNN outvoted by both vision models", ref)
-    return _out("auto", top, "2-of-3" if count == 2 else "unanimous", ref)
+        if cnn:
+            return {"status": "auto", "label": cnn, "reason": "cnn alone", "ref": cnn}
+        return {"status": "review", "label": None, "reason": "no answer", "ref": None}
+    if scheme == "A":
+        return dd.decide_labels("pair", cnn, flash)
+    if scheme == "A_gemma":
+        return dd.decide_labels("pair", cnn, gemma)
+    return dd.decide_labels(MODE_OF[scheme], cnn, flash, gemma)
 
 
 # ---------------- scoring ----------------
@@ -105,6 +92,10 @@ def score(images: list, scheme_key: str) -> dict:
         truth = im["truth"]
         if r["status"] == "auto":
             c["auto_correct" if r["label"] == truth else "silent_wrong"] += 1
+            # the CNN was right, both vision models agreed on another label, and the scheme went with them silently
+            if (r["label"] != truth and labels["cnn"] == truth and labels["flash"] and labels["flash"] == labels["gemma"]
+                    and labels["flash"] != labels["cnn"]):
+                c["silent_outvote"] += 1
         else:
             c["review"] += 1
             c["false_alarm" if r["ref"] == truth else "good_flag"] += 1
@@ -114,7 +105,7 @@ def score(images: list, scheme_key: str) -> dict:
                 c["review_outvoted"] += 1
     n = len(images)
     return {"scheme": scheme_key, "title": scheme[1], "n": n, "auto_correct": c["auto_correct"],
-            "silent_wrong": c["silent_wrong"], "review": c["review"], "review_rate": c["review"] / n if n else 0.0,
+            "silent_wrong": c["silent_wrong"], "silent_outvote": c["silent_outvote"], "review": c["review"], "review_rate": c["review"] / n if n else 0.0,
             "false_alarm": c["false_alarm"], "good_flag": c["good_flag"], "extra_calls": scheme[3],
             "lat_avg": sum(lats) / n if n else 0.0, "lat_max": max(lats) if lats else 0.0}
 
@@ -314,11 +305,11 @@ def render(images: list, title_note: str = "") -> str:
             continue
         facts = dataset_facts(subset)
         out += [f"### {gname.capitalize()} ({len(subset)} images)", "",
-                "| Scheme | Auto answers correct | SILENT wrong | Human review (rate) | False alarms | Good flags (CNN was wrong) "
-                "| Extra calls per upload | Latency avg / max |", "|---|---|---|---|---|---|---|---|"]
+                "| Scheme | Auto answers correct | SILENT wrong | CNN right but silently outvoted | Human review (rate) | False alarms "
+                "| Good flags (CNN was wrong) | Extra calls per upload | Latency avg / max |", "|---|---|---|---|---|---|---|---|---|"]
         for key, *_ in SCHEMES:
             s = score(subset, key)
-            out.append(f"| {s['title']} | {s['auto_correct']} | **{s['silent_wrong']}** | {s['review']} "
+            out.append(f"| {s['title']} | {s['auto_correct']} | **{s['silent_wrong']}** | {s['silent_outvote']} | {s['review']} "
                        f"({100 * s['review_rate']:.0f}%) | {s['false_alarm']} | {s['good_flag']} | {s['extra_calls']} | "
                        f"{s['lat_avg']:.1f}s / {s['lat_max']:.1f}s |")
         out += ["", f"Facts about these images: 3-way splits (all three detectors answered, three different labels): "

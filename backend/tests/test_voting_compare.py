@@ -39,6 +39,16 @@ def test_pair_with_gemma_ignores_flash():
     assert vc.decide("A_gemma", L(C, C, N))["status"] == "review"
 
 
+def test_unanimity_U():
+    assert vc.decide("U", L(C, C, C))["status"] == "auto"
+    for labels in (L(C, C, N), L(C, N, N), L(C, N, B)):       # any disagreement among three -> a human
+        assert vc.decide("U", labels)["status"] == "review", labels
+    assert vc.decide("U", L(C, C, None))["status"] == "auto"   # two left and they agree
+    assert vc.decide("U", L(C, None, N))["status"] == "review"  # two left and they disagree
+    assert vc.decide("U", L(C, None, None))["label"] == C       # one left answers alone
+    assert vc.decide("U", L())["status"] == "review"
+
+
 @pytest.mark.parametrize("scheme", ["B", "C"])
 def test_three_voters_agree(scheme):
     r = vc.decide(scheme, L(C, C, C))
@@ -118,6 +128,15 @@ def test_scores_for_each_scheme():
     assert (s["C"]["false_alarm"], s["C"]["good_flag"]) == (2, 1)
 
 
+def test_scheme_U_and_the_silent_outvote_count():
+    u = vc.score(FAKE, "U")
+    # img1 ok; img2,3,4 disagree -> review; img5 everybody N (wrong, silent); img6 two left agree -> ok
+    assert (u["auto_correct"], u["silent_wrong"], u["review"], u["extra_calls"]) == (2, 1, 3, 2)
+    # B silently follows the two vision models against a CNN that was right (img3): the number rule (b) looks at
+    assert vc.score(FAKE, "B")["silent_outvote"] == 1
+    assert vc.score(FAKE, "C")["silent_outvote"] == 0 and vc.score(FAKE, "U")["silent_outvote"] == 0
+
+
 def test_scheme_C_review_reasons_and_false_alarms():
     c = vc.score([img(C, C, N, N)], "C")   # CNN right, outvoted
     assert (c["review"], c["false_alarm"], c["good_flag"], c["silent_wrong"]) == (1, 1, 0, 0)
@@ -151,8 +170,9 @@ def test_consistency_check_reports_mismatches_on_other_data():
 
 def test_render_contains_the_decision_rule_and_a_silent_wrong_column():
     out = vc.render(FAKE)
-    assert "SILENT wrong" in out and "Decision rule (fixed BEFORE the results were looked at)" in out
-    assert "If it is unclear, keep A" in out
+    assert "SILENT wrong" in out and "Decision rule" in out
+    assert "written BEFORE any real-photo result" in out and "KEEP `pair`" in out
+    assert "U  Unanimity" in out and "A' Pair: CNN + Gemma" in out and "CNN right but silently outvoted" in out
 
 
 # ---------------- Phase 2: collect, save, replay ----------------
