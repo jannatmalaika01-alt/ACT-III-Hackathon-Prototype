@@ -70,37 +70,51 @@ concurrent calls. SOP retrieval stays on the CPU (Token Factory has no embedding
 
 ## Dual detector
 
-**What it does.** When someone uploads a photo, two detectors look at it at the same time: our small image model (the CNN)
-and one AMD Token Factory vision model (**Qwen3.8-Flash-Next**). If they name the same defect, the result is marked
-`agree`. If they name different defects, the result is marked `disagree`, a person is asked to check the photo, and the
-case shows both answers side by side. We never average the two confidences. If the vision model fails or is slow, the CNN
-answers alone (`single_detector`) and the upload still works. There is no fallback chain and no voting.
+**What it does.** When someone uploads a photo, our small image model (the CNN) and one or two AMD Token Factory vision
+models look at it at the same time. If the detectors agree, the result is automatic. If they disagree, a person is asked
+to check the photo, the case shows every detector's answer side by side (we never average the confidences), and it also
+says how many detectors voted for each defect, for example "2 of 3 say corrosion", so the reviewer sees a suggestion. A
+detector that fails or is slow is simply left out; the upload always works.
 
-**How to turn it on.** In `backend/.env` set `DUAL_DETECTOR=on` (the demo values are in `backend/.env.example`; in the code it
-is off unless you set it). `DUAL_VISION_MODEL` picks the vision model; to try **Gemma-4-31B-IT** change only that line.
-`/health` shows whether it is on and which model is used. The text model that writes the diagnosis stays
-**MiMo-V2.6-Flash**; **DeepSeek-V4-Flash** with `TOKENFACTORY_REASONING_EFFORT=none` is the documented backup (you switch it by hand).
+**Turn it on.** In `backend/.env` set `DUAL_DETECTOR=on`. In the code it is off unless you set it. `/health` shows
+whether it is on, the mode and the models.
+
+**The four modes (`DUAL_MODE`).** **`pair` is the default and the only mode we recommend today.**
+
+| Mode | Detectors | What it does |
+|---|---|---|
+| `pair` (default) | CNN + `DUAL_VISION_MODEL` (Qwen3.8-Flash-Next) | Same answer: automatic. Different answers: a person checks. |
+| `unanimous` | CNN + both vision models | Automatic only if everyone agrees. Any disagreement: a person checks. |
+| `vote` | the same three | Two out of three win automatically. All three different: a person checks. |
+| `cnn_anchored` | the same three | Like `vote`, but if the two vision models agree with each other and outvote the CNN, a person checks instead of the vote deciding silently. |
+
+If one detector is missing, the other two must agree; if two are missing, the last one answers alone. The second vision
+model is `DUAL_VISION_MODEL_2` (default Gemma-4-31B-IT) and is only called by the three modes that need a third detector,
+so they cost one extra call per upload. The text model that writes the diagnosis stays **MiMo-V2.6-Flash**;
+**DeepSeek-V4-Flash** with `TOKENFACTORY_REASONING_EFFORT=none` is the documented backup (you switch it by hand).
+
+**The mode will only be changed after the real-photo run.** Until then `pair` stays the default. The rule for deciding is
+written down in `docs/voting_comparison.md` (it was written before any real-photo result).
 
 **Limits you should know.**
 - Our test images are synthetic (made by the same generator that trained the CNN) and there are only about 20 independent
   ones (each has 4 blurred, darkened, rotated or noisy copies). On them the second detector caught all of the CNN's mistakes,
-  but real factory photos may behave differently. Run `backend/scripts/real_photo_check.py` on real photos before trusting it.
-- Each upload spends one extra call from the team's shared Token Factory quota (20 requests per minute for our key) and adds
-  a few seconds.
+  but real factory photos may behave differently. With 20 to 40 real photos only large differences can be seen.
+- Each upload spends one extra call (three modes: two) from the team's shared Token Factory quota (20 requests per minute
+  for our key) and adds a few seconds.
 - Gemma-4-31B-IT and Qwen3.8-Flash-Next differ by amounts that are within noise on this test; Gemma was more accurate alone
   but the endpoint had worker outages for it, which is why Qwen3.8-Flash-Next is the default.
-- **MiMo-V2.6-Flash accepts images but cannot see them** (it answered "white" for a red square). Never use it as the vision model.
+- **MiMo-V2.6-Flash accepts images but cannot see them** (it answered "white" for a red square). Never use it as a vision model.
 
 **Check it on real photos.** Put the photos and a `labels.csv` (header `filename,label`) in `data/real_photos/` (git-ignored), then:
 `cd backend && PYTHONPATH=. python scripts/real_photo_check.py --photos ../data/real_photos`
 (add `--vision-model Gemma-4-31B-IT` to compare the other model on the same photos).
 
-**Compare ways of combining the detectors on real photos** (CNN alone, the pair, and two 3-way votes): same folder and
-`labels.csv`, then `cd backend && PYTHONPATH=. python scripts/voting_compare.py --photos ../data/real_photos`
-(about 2 vision requests per photo at 15 per minute; `--replay-only` re-scores the saved answers with no API call).
-Background: `docs/voting_comparison.md`.
-
-Details and tables: `docs/dual_detector_results.md`.
+**Compare all the ways of combining the detectors on real photos** (CNN alone, the pair with each vision model, and the
+three-detector rules): same folder and `labels.csv`, then
+`cd backend && PYTHONPATH=. python scripts/voting_compare.py --photos ../data/real_photos`
+(2 vision requests per photo at 15 per minute; `--replay-only` re-scores the saved answers with no API call).
+Background: `docs/voting_comparison.md`. Details and tables: `docs/dual_detector_results.md`.
 
 ---
 
