@@ -95,6 +95,11 @@ is off unless you set it). `DUAL_VISION_MODEL` picks the vision model; to try **
 `cd backend && PYTHONPATH=. python scripts/real_photo_check.py --photos ../data/real_photos`
 (add `--vision-model Gemma-4-31B-IT` to compare the other model on the same photos).
 
+**Compare ways of combining the detectors on real photos** (CNN alone, the pair, and two 3-way votes): same folder and
+`labels.csv`, then `cd backend && PYTHONPATH=. python scripts/voting_compare.py --photos ../data/real_photos`
+(about 2 vision requests per photo at 15 per minute; `--replay-only` re-scores the saved answers with no API call).
+Background: `docs/voting_comparison.md`.
+
 Details and tables: `docs/dual_detector_results.md`.
 
 ---
