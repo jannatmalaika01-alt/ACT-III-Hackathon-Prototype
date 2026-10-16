@@ -94,10 +94,17 @@ def low_confidence(state: AgentState) -> dict:
     ref = f" (image {defect['image_ref']})" if defect.get("image_ref") else ""
     if defect.get("needs_human_review"):
         d = defect.get("detectors") or {}
-        cnn, vlm = d.get("cnn") or {}, d.get("vision_model") or {}
-        why = (f"The two detectors DISAGREE: CNN says {cnn.get('label')} (confidence {cnn.get('confidence')}), "
-               f"vision model {vlm.get('name') or ''} says {vlm.get('label')} (confidence {vlm.get('confidence')}). "
-               f"The confidences are from different models and are not combined.")
+        parts = []
+        for key, who in (("cnn", "CNN"), ("vision_model", None), ("vision_model_2", None)):
+            x = d.get(key)
+            if x is None:
+                continue
+            name = who or x.get("name") or "vision model"
+            parts.append(f"{name} says {x['label']} (confidence {x.get('confidence')})" if x.get("label")
+                         else f"{name} gave no answer")
+        votes = f" Votes: {d['suggestion']}." if d.get("suggestion") else ""
+        why = ("The detectors DISAGREE: " + "; ".join(parts) + "." + votes +
+               " The confidences are from different models and are not combined.")
     else:
         why = (f"Detection confidence {defect['confidence']} is below the "
                f"{LOW_CONFIDENCE_THRESHOLD} threshold, so this may be a false positive.")

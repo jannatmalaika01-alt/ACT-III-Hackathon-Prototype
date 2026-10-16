@@ -118,14 +118,17 @@ def _detect_dual(case_id: str, location: Optional[str]):
     dual = dual_detector.run_dual(str(path))
     if dual is None:
         return None
-    chosen = dual["cnn"] if dual["cnn"].get("label") else dual["vision_model"]
+    # `answer` is the decided label (or, on a review, the leading suggestion) with the confidence of the detector
+    # that gave it: confidences are never averaged
+    chosen = dual["answer"]
     report = {
         "defect_type": chosen["label"].replace("_", " "),
         "location": location or DEFAULT_LOCATION,
         "confidence": max(0.0, min(1.0, float(chosen.get("confidence") if chosen.get("confidence") is not None else 0.0))),
         "image_ref": path.name,
         "needs_human_review": dual["needs_human_review"],
-        "detectors": {"cnn": dual["cnn"], "vision_model": dual["vision_model"], "agreement": dual["agreement"]},
+        "detectors": {k: dual[k] for k in ("mode", "cnn", "vision_model", "vision_model_2", "agreement", "votes",
+                                            "suggestion", "models_answered") if k in dual},
     }
     return report, dual
 
@@ -227,6 +230,9 @@ def create_app(settings: Optional[Settings] = None, repo=None, evolus=None) -> F
             "detector": "defect_cnn" if real_detector else "simulated",
             "dual_detector": dual_detector.enabled(),
             "vision_model": dual_detector.vision_model() if dual_detector.enabled() else None,
+            "dual_mode": dual_detector.mode() if dual_detector.enabled() else None,
+            "vision_model_2": (dual_detector.vision_model_2()
+                               if dual_detector.enabled() and dual_detector.mode() != "pair" else None),
         }
 
     @app.post("/cases", status_code=201)

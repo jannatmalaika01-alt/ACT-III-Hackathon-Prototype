@@ -1,11 +1,17 @@
-"""Dual detector: the CNN (Titus's model) and an AMD Token Factory vision model look at the same image in
+"""Dual detector: the CNN (Titus's model) and AMD Token Factory vision model(s) look at the same image in
 parallel and their answers are compared. Switched on with DUAL_DETECTOR=on (default off).
 
-    agree            both detectors gave the same label
-    disagree         different labels  -> needs_human_review = True; BOTH results are kept and passed on
-    single_detector  only one detector answered (the other failed or timed out)
+DUAL_MODE picks how the answers are combined (default `pair`, the original behaviour):
+    pair         CNN + DUAL_VISION_MODEL. Same label -> automatic; different -> human review.
+    unanimous    CNN + DUAL_VISION_MODEL + DUAL_VISION_MODEL_2. Automatic ONLY if all available detectors agree.
+    vote         the same three; 2-of-3 wins automatically; a 3-way split -> human review.
+    cnn_anchored the same three; 2-of-3 wins, EXCEPT when the two vision models agree and outvote the CNN or when
+                 there is a 3-way split: then a human decides.
+A detector that fails or times out is MISSING: with two left they must agree; with one left it answers alone
+(`single_detector`); with none the caller falls back to the normal single-CNN path. An upload never fails because of this.
 
-The two confidences are NEVER averaged or merged: each detector's own number is kept next to its label.
+agreement: agree (all answers equal) / disagree / single_detector. needs_human_review is the mode's decision.
+Confidences are NEVER averaged or merged: each detector's own number is kept next to its label.
 """
 from __future__ import annotations
 
@@ -15,8 +21,9 @@ import logging
 import mimetypes
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
+from collections import Counter
 from typing import Callable, Optional
 
 log = logging.getLogger("dual_detector")
@@ -35,8 +42,25 @@ def enabled() -> bool:
     return os.getenv("DUAL_DETECTOR", "off").strip().lower() in ("on", "1", "true", "yes")
 
 
+MODES = ("pair", "unanimous", "vote", "cnn_anchored")
+
+
+def mode() -> str:
+    """DUAL_MODE, default `pair`. An unknown value falls back to `pair` (never breaks the app)."""
+    m = os.getenv("DUAL_MODE", "pair").strip().lower()
+    if m not in MODES:
+        log.warning("unknown DUAL_MODE %r; using pair", m)
+        return "pair"
+    return m
+
+
 def vision_model() -> str:
     return os.getenv("DUAL_VISION_MODEL", "Qwen3.8-Flash-Next").strip()
+
+
+def vision_model_2() -> str:
+    """The second vision model: only used by the modes that need a third detector (not `pair`)."""
+    return os.getenv("DUAL_VISION_MODEL_2", "Gemma-4-31B-IT").strip()
 
 
 def _timeout() -> float:
@@ -66,7 +90,16 @@ _cnn = None
 
 
 def run_vision_model(path: str) -> dict:
-    """The Token Factory vision model's own answer: {"label", "confidence", "model"}. Raises on any failure."""
+    """DUAL_VISION_MODEL's own answer: {"label", "confidence", "model"}. Raises on any failure."""
+    return _call_vision(path, vision_model())
+
+
+def run_vision_model_2(path: str) -> dict:
+    """DUAL_VISION_MODEL_2's own answer (modes unanimous / vote / cnn_anchored only). Raises on any failure."""
+    return _call_vision(path, vision_model_2())
+
+
+def _call_vision(path: str, model: str) -> dict:
     import core  # backend/core.py: provider config, 429 retries and the concurrency cap are reused
 
     p = next((x for x in core._providers() if x["name"] == "tokenfactory"), None)
@@ -75,7 +108,7 @@ def run_vision_model(path: str) -> dict:
     mime = mimetypes.guess_type(path)[0] or "image/png"
     data = base64.b64encode(Path(path).read_bytes()).decode()
     payload = {
-        "model": vision_model(), "temperature": 0.2, "max_tokens": 1500,
+        "model": model, "temperature": 0.2, "max_tokens": 1500,
         "response_format": {"type": "json_object"},
         "messages": [{"role": "system", "content": "You are a factory maintenance assistant."},
                      {"role": "user", "content": [{"type": "text", "text": PROMPT},
@@ -99,46 +132,127 @@ def run_vision_model(path: str) -> dict:
     return {"label": label, "confidence": conf, "model": body.get("model") or payload["model"]}
 
 
+# ---------------- the rules (labels only) ----------------
+
+def decide_labels(dual_mode: str, cnn: Optional[str], v1: Optional[str], v2: Optional[str] = None) -> dict:
+    """Apply a mode's rule to the labels the detectors gave (None = missing).
+    Returns {"status": "auto"|"review", "label", "reason", "ref"}. `label` is the automatic answer (None on review);
+    `ref` is what a review is judged against: the CNN's label if it answered, else the leading label."""
+    pairs = [("cnn", cnn), ("v1", v1)] + ([("v2", v2)] if dual_mode != "pair" else [])
+    present = [(k, l) for k, l in pairs if l]
+    names = [l for _, l in present]
+
+    def out(status, label, reason):
+        ref = cnn or (Counter(names).most_common(1)[0][0] if names else None)
+        return {"status": status, "label": label, "reason": reason, "ref": ref}
+
+    if not present:
+        return out("review", None, "no detector answered")
+    top, count = Counter(names).most_common(1)[0]
+    if len(present) == 1:
+        return out("auto", names[0], "single detector")
+    if len(present) == 2:
+        return out("auto", top, "agree") if names[0] == names[1] else out("review", None, "disagree")
+    # three voters
+    if dual_mode == "unanimous":
+        return out("auto", top, "unanimous") if count == 3 else out("review", None, "disagree")
+    if count == 1:
+        return out("review", None, "3-way split")
+    if dual_mode == "cnn_anchored" and cnn != top:
+        return out("review", None, "CNN outvoted by both vision models")
+    return out("auto", top, "unanimous" if count == 3 else "2-of-3")
+
+
 # ---------------- comparison ----------------
 
-def compare(cnn: Optional[dict], vlm: Optional[dict], cnn_error: Optional[str] = None,
-            vlm_error: Optional[str] = None) -> Optional[dict]:
-    """Combine the two results. Returns None when BOTH detectors failed (nothing to compare)."""
-    if cnn is None and vlm is None:
+def _votes_text(names: list) -> tuple:
+    """({label: n}, "2 of 3 say corrosion") so a human reviewer sees the suggestion."""
+    n = len(names)
+    votes = dict(Counter(names))
+    if not n:
+        return votes, "no detector answered"
+    top, count = Counter(names).most_common(1)[0]
+    if count > 1 or n == 1:
+        return votes, f"{count} of {n} say {top.replace('_', ' ')}"
+    return votes, "no majority: " + ", ".join(f"1 of {n} says {l.replace('_', ' ')}" for l in names)
+
+
+def combine(dual_mode: str, cnn: Optional[dict], vlm: Optional[dict], vlm2: Optional[dict] = None,
+            errors: Optional[dict] = None) -> Optional[dict]:
+    """Combine the detectors' answers for `dual_mode`. Returns None when NO detector answered."""
+    errors = errors or {}
+    three = dual_mode != "pair"
+    answers = [("cnn", cnn), ("vision_model", vlm)] + ([("vision_model_2", vlm2)] if three else [])
+    if all(a is None for _, a in answers):
         return None
-    out = {
-        "enabled": True,
-        "cnn": cnn if cnn is not None else {"label": None, "confidence": None, "error": cnn_error or "failed"},
-        "vision_model": ({**vlm, "name": vlm.get("model") or vision_model()} if vlm is not None
-                         else {"name": vision_model(), "label": None, "confidence": None,
-                               "error": vlm_error or "failed"}),
-    }
-    if cnn is None or vlm is None:
-        out.update(agreement=SINGLE, needs_human_review=False,
-                   note=f"Only one detector answered ({'CNN' if vlm is None else 'vision model'}).")
-    elif cnn["label"] == vlm["label"]:
-        out.update(agreement=AGREE, needs_human_review=False, note="Both detectors report the same defect.")
+
+    def shown(key, a):
+        if key == "cnn":
+            return a if a is not None else {"label": None, "confidence": None, "error": errors.get("cnn") or "failed"}
+        model = vision_model() if key == "vision_model" else vision_model_2()
+        if a is not None:
+            return {**a, "name": a.get("model") or model}
+        return {"name": model, "label": None, "confidence": None, "error": errors.get(key) or "failed"}
+
+    out = {"enabled": True, "mode": dual_mode}
+    for key, a in answers:
+        out[key] = shown(key, a)
+    present = [(k, a) for k, a in answers if a is not None]
+    names = [a["label"] for _, a in present]
+    d = decide_labels(dual_mode, cnn["label"] if cnn else None, vlm["label"] if vlm else None,
+                      vlm2["label"] if vlm2 else None)
+    votes, suggestion = _votes_text(names)
+    lead = d["label"] or (cnn["label"] if cnn else Counter(names).most_common(1)[0][0])
+    if d["status"] == "review" and Counter(names).most_common(1)[0][1] > 1:
+        lead = Counter(names).most_common(1)[0][0]          # the majority is the suggestion
+    owner = next(a for _, a in present if a["label"] == lead)  # first holder in order cnn, vision, vision 2
+    agreement = (SINGLE if len(present) == 1 else AGREE if len(set(names)) == 1 else DISAGREE)
+    review = d["status"] == "review"
+    if len(present) == 1:
+        who = "CNN" if cnn else "vision model"
+        note = f"Only one detector answered ({who})."
+    elif review:
+        note = ("Detectors disagree" if d["reason"] in ("disagree", "3-way split") else d["reason"]) + \
+               ": " + ", ".join(f"{'CNN' if k == 'cnn' else out[k]['name']} says {a['label']}" for k, a in present) + "."
+    elif agreement == AGREE:
+        note = "All detectors report the same defect."
     else:
-        out.update(agreement=DISAGREE, needs_human_review=True,
-                   note=f"Detectors disagree: CNN says {cnn['label']}, vision model says {vlm['label']}.")
+        note = f"Majority decides ({suggestion}); mode {dual_mode}."
+    out.update(
+        agreement=agreement, needs_human_review=review, decision=d["reason"], votes=votes, suggestion=suggestion,
+        answer={"label": lead, "confidence": owner.get("confidence"),
+                "from": next(k for k, a in present if a is owner)},
+        models_answered=["CNN" if k == "cnn" else out[k]["name"] for k, _ in present], note=note)
     return out
 
 
+def compare(cnn: Optional[dict], vlm: Optional[dict], cnn_error: Optional[str] = None,
+            vlm_error: Optional[str] = None) -> Optional[dict]:
+    """Pair comparison (the original behaviour). Returns None when BOTH detectors failed."""
+    return combine("pair", cnn, vlm, None, {"cnn": cnn_error, "vision_model": vlm_error})
+
+
 def run_dual(path: str, cnn_fn: Optional[Callable] = None, vlm_fn: Optional[Callable] = None,
-             timeout: Optional[float] = None) -> Optional[dict]:
-    """Run both detectors in parallel on one image and compare. A detector that fails or is too slow is
-    recorded as an error (single_detector), it never fails the request."""
-    cnn_fn, vlm_fn, timeout = cnn_fn or run_cnn, vlm_fn or run_vision_model, timeout or _timeout()
-    pool = ThreadPoolExecutor(max_workers=2)
-    futures = {"cnn": pool.submit(cnn_fn, path), "vlm": pool.submit(vlm_fn, path)}
+             timeout: Optional[float] = None, dual_mode: Optional[str] = None,
+             vlm2_fn: Optional[Callable] = None) -> Optional[dict]:
+    """Run the detectors for the active mode in parallel on one image and combine them. A detector that fails or is
+    too slow is MISSING, it never fails the request. One deadline covers all detectors (they run side by side)."""
+    dual_mode, timeout = dual_mode or mode(), timeout or _timeout()
+    jobs = {"cnn": cnn_fn or run_cnn, "vision_model": vlm_fn or run_vision_model}
+    if dual_mode != "pair":
+        jobs["vision_model_2"] = vlm2_fn or run_vision_model_2
+    pool = ThreadPoolExecutor(max_workers=len(jobs))
+    futures = {key: pool.submit(fn, path) for key, fn in jobs.items()}
+    wait(list(futures.values()), timeout=timeout)
     results, errors = {}, {}
     for key, fut in futures.items():
-        try:
-            results[key] = fut.result(timeout=timeout)
-        except FutureTimeout:
+        if not fut.done():
             errors[key] = f"no answer within {timeout:.0f}s"
+            continue
+        try:
+            results[key] = fut.result()
         except Exception as exc:  # never include the request: it may carry the image or key
             errors[key] = f"{type(exc).__name__}"
             log.warning("%s detector failed: %s", key, type(exc).__name__)
     pool.shutdown(wait=False)  # a timed-out call keeps running in the background, we just stop waiting
-    return compare(results.get("cnn"), results.get("vlm"), errors.get("cnn"), errors.get("vlm"))
+    return combine(dual_mode, results.get("cnn"), results.get("vision_model"), results.get("vision_model_2"), errors)
