@@ -7,3 +7,4 @@ __pycache__/
 .venv/
 venv/
 data/dual_lab/
+data/real_photos/
