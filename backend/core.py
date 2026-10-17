@@ -178,7 +178,7 @@ def _ask(p: dict, system: str, prompt: str, json_output: bool) -> tuple:
     max_tokens = TF_MAX_TOKENS
     schema = p["name"] == "tokenfactory" and json_output and _use_schema(p)
     cut_off_retried = False
-    efforts = [e for e in (_effort(), "low", "omit") if e]  # some models reject "none" (MiniCPM-V-4.7-1B)
+    efforts = [e for e in (p.get("effort") or _effort(), "low", "omit") if e]  # some models reject "none" (MiniCPM-V-4.7-1B)
     efforts = list(dict.fromkeys(efforts))
     for _ in range(6):  # extra passes: answer cut off by max_tokens, or the server refused the json_schema
         try:
@@ -245,6 +245,41 @@ def call_llm(prompt: str, system: str = "You are a factory maintenance assistant
         LAST_LLM.update(provider=p["name"], model=model)
         return text
     raise LLMUnavailableError("All LLM providers failed (" + ", ".join(errors) + ")")
+
+
+def text_fallback_model() -> str:
+    return os.getenv("TEXT_FALLBACK_MODEL", "DeepSeek-V4-Flash").strip() or "DeepSeek-V4-Flash"
+
+
+def text_fallback_effort() -> str:
+    return os.getenv("TEXT_FALLBACK_EFFORT", "none").strip() or "none"
+
+
+def primary_text_model() -> str:
+    return os.getenv("TOKENFACTORY_MODEL", "MiMo-V2.6-Flash").strip() or "MiMo-V2.6-Flash"
+
+
+def call_llm_backup(prompt: str, system: str = "You are a factory maintenance assistant.",
+                    json_output: bool = True) -> str:
+    """ONE attempt with the backup text model (TEXT_FALLBACK_MODEL, default DeepSeek-V4-Flash, reasoning effort
+    TEXT_FALLBACK_EFFORT, default none) on Token Factory, with the same base URL and key as the primary. The usual
+    429/502/503 transport retries still apply, but there is no further fallback: failure raises LLMUnavailableError."""
+    tf = next((p for p in _providers() if p["name"] == "tokenfactory"), None)
+    if tf is None:
+        raise LLMUnavailableError("Backup text model: Token Factory is not configured")
+    p = {**tf, "model": text_fallback_model(), "effort": text_fallback_effort()}
+    try:
+        text, model = _ask(p, system, prompt, json_output)
+    except LLMConfigError as exc:
+        raise LLMUnavailableError(f"Backup text model: {exc}") from None
+    except httpx.HTTPStatusError as exc:
+        detail = _error_detail(exc.response)
+        log.warning("backup text model failed: HTTP %s %s", exc.response.status_code, detail)
+        raise LLMUnavailableError(f"Backup text model: HTTP {exc.response.status_code}") from None
+    except Exception as exc:  # never include the request or the key
+        raise LLMUnavailableError(f"Backup text model: {type(exc).__name__}") from None
+    LAST_LLM.update(provider="tokenfactory", model=model)
+    return text
 
 
 # ---------------- Test defects (agent.py's `python agent.py` demo; no real detector needed) ----------------

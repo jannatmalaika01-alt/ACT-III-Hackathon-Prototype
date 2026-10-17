@@ -14,7 +14,7 @@ import re
 from typing import TypedDict, Optional
 from langgraph.graph import StateGraph, END
 import core
-from core import call_llm, retrieve, FAKE_DEFECTS
+from core import call_llm, call_llm_backup, retrieve, FAKE_DEFECTS
 
 LOW_CONFIDENCE_THRESHOLD = 0.70
 VALID_SEVERITIES = ("low", "medium", "high", "critical")
@@ -96,6 +96,30 @@ def retrieve_context(state: AgentState) -> dict:
     return {"retrieved_docs": docs}
 
 
+def _detector_parts(d: dict) -> list:
+    parts = []
+    for key, who in (("cnn", "CNN"), ("vision_model", None), ("vision_model_2", None)):
+        x = d.get(key)
+        if x is None:
+            continue
+        name = who or x.get("name") or "vision model"
+        parts.append(f"{name} says {x['label']} (confidence {x.get('confidence')})" if x.get("label")
+                     else f"{name} gave no answer")
+    return parts
+
+
+def _review_reason(defect: dict) -> str:
+    d = defect.get("detectors") or {}
+    parts = _detector_parts(d)
+    votes = f" Votes: {d['suggestion']}." if d.get("suggestion") else ""
+    warn = "".join(f" Warning: {w}" for w in (d.get("warnings") or []))
+    if str(d.get("decision") or "").startswith("both vision models failed"):
+        return ("BOTH VISION MODELS FAILED, so only the CNN answered (low trust: it was trained on drawings and is weak "
+                "on real photos): " + "; ".join(parts) + "." + warn)
+    return ("The detectors DISAGREE: " + "; ".join(parts) + "." + votes + warn +
+            " The confidences are from different models and are not combined.")
+
+
 def low_confidence(state: AgentState) -> dict:
     """Detection itself is doubtful: skip the LLM and ask a human to verify the detection first.
 
@@ -106,23 +130,7 @@ def low_confidence(state: AgentState) -> dict:
     top = state["retrieved_docs"][0]
     ref = f" (image {defect['image_ref']})" if defect.get("image_ref") else ""
     if defect.get("needs_human_review"):
-        d = defect.get("detectors") or {}
-        parts = []
-        for key, who in (("cnn", "CNN"), ("vision_model", None), ("vision_model_2", None)):
-            x = d.get(key)
-            if x is None:
-                continue
-            name = who or x.get("name") or "vision model"
-            parts.append(f"{name} says {x['label']} (confidence {x.get('confidence')})" if x.get("label")
-                         else f"{name} gave no answer")
-        votes = f" Votes: {d['suggestion']}." if d.get("suggestion") else ""
-        warn = "".join(f" Warning: {w}" for w in (d.get("warnings") or []))
-        if str(d.get("decision") or "").startswith("both vision models failed"):
-            why = ("BOTH VISION MODELS FAILED, so only the CNN answered (low trust: it was trained on drawings and is weak "
-                   "on real photos): " + "; ".join(parts) + "." + warn)
-        else:
-            why = ("The detectors DISAGREE: " + "; ".join(parts) + "." + votes + warn +
-                   " The confidences are from different models and are not combined.")
+        why = _review_reason(defect)
     else:
         why = (f"Detection confidence {defect['confidence']} is below the "
                f"{LOW_CONFIDENCE_THRESHOLD} threshold, so this may be a false positive.")
@@ -170,44 +178,105 @@ Based ONLY on these excerpts, explain what this defect means and propose one spe
 Reply with ONLY a JSON object, no other text:
 {{"explanation": "...", "recommended_action": "...", "severity": "low|medium|high|critical", "source_index": <number of the excerpt you relied on>, "evidence_quote": "<5-25 words copied EXACTLY from that excerpt that support your action>"}}"""
 
-    output = call_llm(prompt)
-    data = _extract_json(output)
-    retried = False
-    if not data:  # model ignored the JSON format: ask once more before falling back
-        retried = True
-        output = call_llm(prompt + "\n\nYour last reply was not valid JSON. Reply with ONLY the JSON object.")
-        data = _extract_json(output)
+    primary = _attempt(call_llm, core.primary_text_model(), "primary", prompt, docs, retry_invalid_json=True)
+    attempts = [primary]
+    winner = primary if primary["ok"] else None
+    if winner is None:  # the backup text model gets ONE try, never a loop
+        backup = _attempt(call_llm_backup, core.text_fallback_model(), "fallback", prompt, docs, retry_invalid_json=False)
+        attempts.append(backup)
+        winner = backup if backup["ok"] else None
+    trail = [{"role": a["role"], "model": a["model"], "problem": a["problem"]} for a in attempts]
 
-    # The citation comes from the retrieved documents, never from free text, so it can't be invented.
+    if winner is None:
+        return _recommendation_unavailable(defect, docs, attempts, trail)
+
+    data, source, quote = winner["data"], winner["source"], winner["quote"]
+    severity = str(data.get("severity", "")).strip().lower()
+    if severity not in VALID_SEVERITIES:
+        severity = "medium"
+    written_by = f"written by {winner['model']}" + (" (fallback)" if winner["role"] == "fallback" else "")
+    return {
+        "llm_output": winner["output"],
+        "grounding": {
+            "evidence_quote": quote or None,
+            "evidence_quote_verified": True,  # a recommendation whose quote is not in the cited chunk is never accepted
+            "json_retried": winner["retried"],
+            "json_valid": True,
+            "writer": {"model": winner["model"], "role": winner["role"], "written_by": written_by, "attempts": trail},
+        },
+        "diagnosis": {
+            "defect": f"{defect['defect_type']} at {defect['location']}",
+            "severity": severity,
+            "explanation": (str(data.get("explanation") or winner["output"] or "No explanation returned by the model.").strip()
+                            + _detector_notes(defect) + f" ({written_by})"),
+            "recommended_action": str(data.get("recommended_action") or "Schedule a manual inspection.").strip(),
+            "source_manual": source["manual"],
+            "source_page": source["page"],
+        },
+    }
+
+
+def _attempt(fn, model_name: str, role: str, prompt: str, docs: list, retry_invalid_json: bool) -> dict:
+    """One writer attempt. ok=True only for a non-empty, valid-JSON recommendation whose evidence quote really
+    appears in the cited manual chunk (our existing citation check). Otherwise ok=False and `problem` says why."""
+    core.LAST_LLM.update(provider=None, model=None)  # so the model name below is this call's, not a stale one
+    res = {"ok": False, "role": role, "model": model_name, "problem": None, "retried": False}
+    try:
+        output = fn(prompt)
+        data = _extract_json(output)
+        if not data and retry_invalid_json:  # model ignored the JSON format: ask once more before giving up on it
+            res["retried"] = True
+            output = fn(prompt + "\n\nYour last reply was not valid JSON. Reply with ONLY the JSON object.")
+            data = _extract_json(output)
+    except Exception as exc:  # timeout, HTTP 5xx / 429 after the transport retries, no provider configured ...
+        res["problem"] = f"call failed ({type(exc).__name__})"
+        return res
+    res["model"] = (core.LAST_LLM.get("model") or model_name).split("/")[-1]
+    res["output"] = output
+    if not (output or "").strip():
+        res["problem"] = "empty response"
+        return res
+    if not data:
+        res["problem"] = "invalid JSON"
+        return res
     try:
         idx = int(data.get("source_index", 0))
     except (TypeError, ValueError):
         idx = 0
     source = docs[idx] if 0 <= idx < len(docs) else docs[0]
-
-    severity = str(data.get("severity", "")).strip().lower()
-    if severity not in VALID_SEVERITIES:
-        severity = "medium"
-
     quote = str(data.get("evidence_quote") or "").strip()
+    if not _quote_in_source(quote, source["text"]):
+        res["problem"] = "citation check failed (the evidence quote is not in the cited manual text)"
+        res["unverified"] = {"quote": quote or None}
+        return res
+    res.update(ok=True, data=data, source=source, quote=quote)
+    return res
+
+
+def _recommendation_unavailable(defect: dict, docs: list, attempts: list, trail: list) -> dict:
+    """Both text models failed. No recommendation is invented: the case still shows every detector's result and the
+    manual citation, severity is a placeholder, and a human must decide. Never raises."""
+    top = docs[0]
+    why = "; ".join(f"{a['role']} {a['model']}: {a['problem']}" for a in attempts)
+    detectors = _detector_parts(defect.get("detectors") or {})
+    seen = f" Detector results: {'; '.join(detectors)}." if detectors else ""
+    ref = f" (image {defect['image_ref']})" if defect.get("image_ref") else ""
     return {
-        "llm_output": output,
-        "grounding": {
-            "evidence_quote": quote or None,
-            "evidence_quote_verified": _quote_in_source(quote, source["text"]),  # quote really is in the cited chunk
-            "json_retried": retried,
-            "json_valid": bool(data),
-        },
+        "llm_output": None,
+        "needs_review": True,
+        "grounding": {"evidence_quote": None, "evidence_quote_verified": False, "json_retried": attempts[0]["retried"],
+                      "json_valid": False,
+                      "writer": {"model": None, "role": "none", "written_by": "no text model produced an answer",
+                                 "attempts": trail}},
         "diagnosis": {
             "defect": f"{defect['defect_type']} at {defect['location']}",
-            "severity": severity,
-            "explanation": (str(data.get("explanation") or output or "No explanation returned by the model.").strip()
-                            + _detector_notes(defect)),
-            "recommended_action": str(
-                data.get("recommended_action") or "Schedule a manual inspection."
-            ).strip(),
-            "source_manual": source["manual"],
-            "source_page": source["page"],
+            "severity": "medium",
+            "explanation": ("RECOMMENDATION UNAVAILABLE (severity is a placeholder, not assessed). The AI writer could not "
+                            f"produce a verified recommendation ({why}).{seen}" + _detector_notes(defect)),
+            "recommended_action": (f"Recommendation unavailable. Manually review the {defect['defect_type']} at "
+                                   f"{defect['location']}{ref} with the cited manual page before any maintenance action."),
+            "source_manual": top["manual"],
+            "source_page": top["page"],
         },
     }
 
