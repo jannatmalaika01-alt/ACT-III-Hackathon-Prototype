@@ -195,11 +195,11 @@ def test_other_modes_do_not_know_about_cnn_dissent():
     assert r["cnn_dissent"] is None and r["warnings"] == []
 
 
-def test_mode_is_selectable_and_the_default_is_unchanged(monkeypatch):
+def test_mode_is_selectable(monkeypatch):
     monkeypatch.setenv("DUAL_MODE", "vision_primary")
     assert dd.mode() == "vision_primary"
-    monkeypatch.delenv("DUAL_MODE")
-    assert dd.mode() == "pair" and dd.enabled() is False
+    monkeypatch.setenv("DUAL_MODE", "pair")
+    assert dd.mode() == "pair"
 
 
 # ---------------- the endpoint and the real agent ----------------
@@ -312,5 +312,59 @@ def test_real_agent_both_vision_failed_says_so(monkeypatch):
                             "warnings": ["Flash failed (timeout)", "Gemma failed (timeout)"]}}
     ex = real.diagnose(report)["explanation"]
     assert ex.startswith("UNVERIFIED") and "BOTH VISION MODELS FAILED" in ex and "Flash gave no answer" in ex
+    for name in ("core", "agent"):
+        sys.modules.pop(name, None)
+
+
+# ---------------- unverified cases: a person confirms WHICH defect, naming the candidates ----------------
+
+REPAIR_WORDS = ("scrape", "replace", "weld", "re-torque", "sandblast", "isolate", "grind", "apply", "inspect wall")
+
+
+def _unverified(monkeypatch, detectors, decision):
+    real = _real_agent(monkeypatch, lambda q: pytest.fail("no LLM on a review"))
+    report = {"defect_type": "corrosion", "location": "plate", "confidence": 0.95, "needs_human_review": True,
+              "image_ref": "p.png", "detectors": {"decision": decision, **detectors}}
+    d = real.diagnose(report)
+    for name in ("core", "agent"):
+        sys.modules.pop(name, None)
+    return d
+
+
+def test_three_way_split_names_all_three_candidates_and_proposes_no_repair(monkeypatch):
+    d = _unverified(monkeypatch, {"cnn": {"label": B, "confidence": 0.47},
+                                  "vision_model": {"name": "self-dploy/Qwen3.8-Flash-Next", "label": C, "confidence": 0.95},
+                                  "vision_model_2": {"name": "Gemma-4-31B-IT", "label": N, "confidence": 0.85}}, "3-way split")
+    a = d["recommended_action"]
+    assert a.startswith("A person must confirm which defect this is")
+    for text in ("corrosion (proposed by Qwen3.8-Flash-Next)", "normal (proposed by Gemma-4-31B-IT)", "bearing wear (proposed by CNN)",
+                 "Do not act on any of them until one is confirmed"):
+        assert text in a
+    assert not any(w in a.lower() for w in REPAIR_WORDS)
+
+
+def test_a_low_confidence_cnn_tie_names_both_candidates_and_the_cnn_as_a_proposer(monkeypatch):
+    d = _unverified(monkeypatch, {"cnn": {"label": C, "confidence": 0.43},
+                                  "vision_model": {"name": "Flash", "label": "bearing_wear", "confidence": 0.78},
+                                  "vision_model_2": {"name": "Gemma", "label": C, "confidence": 0.95},
+                                  "cnn_tie": {"label": C, "confidence": 0.43, "threshold": 0.7}},
+                    "CNN not confident enough to break the tie between the vision models")
+    a = d["recommended_action"]
+    assert "bearing wear (proposed by Flash)" in a and "corrosion (proposed by Gemma, CNN)" in a and not any(w in a.lower() for w in REPAIR_WORDS)
+
+
+def test_when_both_vision_models_failed_the_cnn_is_the_only_candidate(monkeypatch):
+    d = _unverified(monkeypatch, {"cnn": {"label": C, "confidence": 0.9},
+                                  "vision_model": {"name": "Flash", "label": None, "error": "timeout"},
+                                  "vision_model_2": {"name": "Gemma", "label": None, "error": "timeout"}},
+                    "both vision models failed; CNN alone (low trust)")
+    a = d["recommended_action"]
+    assert "corrosion (proposed by CNN)" in a and "Flash" not in a and not any(w in a.lower() for w in REPAIR_WORDS)
+
+
+def test_without_detector_details_the_old_wording_is_kept(monkeypatch):
+    real = _real_agent(monkeypatch, lambda q: pytest.fail("no LLM on a review"))
+    d = real.diagnose({"defect_type": "corrosion", "location": "plate", "confidence": 0.4})
+    assert d["recommended_action"].startswith("Manually verify the corrosion at plate")
     for name in ("core", "agent"):
         sys.modules.pop(name, None)

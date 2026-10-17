@@ -23,6 +23,9 @@ def no_real_llm(monkeypatch):
     # With no key the app uses the offline template writer. The older tests assert what the LLM paths do, so they switch it off;
     # tests/test_offline_writer.py turns it on.
     monkeypatch.setenv("OFFLINE_WRITER", "off")
+    # The default dual mode is vision_primary; the older dual-detector tests were written for the pair, so they pin it here.
+    # tests/test_dual_default_mode.py removes this to check the real default.
+    monkeypatch.setenv("DUAL_MODE", "pair")
 
 
 @pytest.fixture

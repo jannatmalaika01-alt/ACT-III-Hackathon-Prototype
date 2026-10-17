@@ -108,6 +108,29 @@ def _detector_parts(d: dict) -> list:
     return parts
 
 
+def _candidates(defect: dict) -> list:
+    """[(label, [detector names])] for the labels the detectors proposed, vision models first. Empty without detector details."""
+    d = defect.get("detectors") or {}
+    out: dict = {}
+    for key, who in (("vision_model", None), ("vision_model_2", None), ("cnn", "CNN")):
+        x = d.get(key)
+        if x and x.get("label"):
+            out.setdefault(x["label"], []).append(who or str(x.get("name") or "vision model").split("/")[-1])
+    return list(out.items())
+
+
+def _confirm_action(defect: dict, ref: str) -> str:
+    """The recommended action for a disputed case: a person confirms WHICH defect it is, naming every candidate. It never
+    proposes repair steps for any of them (a repair step for the wrong candidate could do harm)."""
+    cands = _candidates(defect)
+    if not cands:
+        return (f"Manually verify the {defect['defect_type']} at {defect['location']}{ref} "
+                f"before taking any maintenance action.")
+    listed = "; ".join(f"{label.replace('_', ' ')} (proposed by {', '.join(names)})" for label, names in cands)
+    return (f"A person must confirm which defect this is{ref} before any maintenance action. Candidates: {listed}. "
+            f"Do not act on any of them until one is confirmed by looking at the photo.")
+
+
 def _review_reason(defect: dict) -> str:
     d = defect.get("detectors") or {}
     parts = _detector_parts(d)
@@ -145,10 +168,9 @@ def low_confidence(state: AgentState) -> dict:
             "defect": f"{defect['defect_type']} at {defect['location']}",
             "severity": "medium",
             "explanation": f"UNVERIFIED DETECTION (severity is a placeholder, not assessed). {why}",
-            "recommended_action": (
-                f"Manually verify the {defect['defect_type']} at {defect['location']}{ref} "
-                f"before taking any maintenance action."
-            ),
+            "recommended_action": (_confirm_action(defect, ref) if defect.get("needs_human_review") else
+                                   f"Manually verify the {defect['defect_type']} at {defect['location']}{ref} "
+                                   f"before taking any maintenance action."),
             "source_manual": top["manual"],
             "source_page": top["page"],
         },

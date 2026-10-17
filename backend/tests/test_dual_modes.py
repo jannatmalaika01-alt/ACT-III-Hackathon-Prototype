@@ -33,18 +33,17 @@ def run(mode, cnn, v1, v2, timeout=2.0):
 
 # ---------------- settings ----------------
 
-def test_default_mode_is_pair_and_detector_is_off(monkeypatch):
-    monkeypatch.delenv("DUAL_MODE", raising=False)
+def test_detector_is_off_and_models_have_defaults(monkeypatch):
     monkeypatch.delenv("DUAL_DETECTOR", raising=False)
     monkeypatch.delenv("DUAL_VISION_MODEL", raising=False)
     monkeypatch.delenv("DUAL_VISION_MODEL_2", raising=False)
-    assert dd.mode() == "pair" and dd.enabled() is False
+    assert dd.enabled() is False                      # the mode default is checked in test_dual_default_mode.py
     assert dd.vision_model() == "Qwen3.8-Flash-Next" and dd.vision_model_2() == "Gemma-4-31B-IT"
 
 
-def test_unknown_mode_falls_back_to_pair(monkeypatch):
+def test_unknown_mode_falls_back_to_the_default_and_names_are_forgiving(monkeypatch):
     monkeypatch.setenv("DUAL_MODE", "banana")
-    assert dd.mode() == "pair"
+    assert dd.mode() == "vision_primary"
     monkeypatch.setenv("DUAL_MODE", " Vote ")
     assert dd.mode() == "vote"
 
@@ -218,9 +217,9 @@ def test_off_by_default_no_detector_runs(client, agent, monkeypatch):
     assert "dual_detector" not in client.post(f"/cases/{_case(client)}/analyze").json()
 
 
-def test_on_without_a_mode_is_the_pair(client, agent, monkeypatch):
+def test_pair_can_still_be_chosen_and_never_uses_the_second_vision_model(client, agent, monkeypatch):
     monkeypatch.setenv("DUAL_DETECTOR", "on")
-    monkeypatch.delenv("DUAL_MODE", raising=False)
+    monkeypatch.setenv("DUAL_MODE", "pair")
     _patch(monkeypatch, C, C, N)
     monkeypatch.setattr(dd, "run_vision_model_2", lambda p: pytest.fail("pair must not use the second vision model"))
     body = client.post(f"/cases/{_case(client)}/analyze").json()

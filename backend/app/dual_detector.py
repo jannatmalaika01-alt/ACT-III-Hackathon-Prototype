@@ -1,7 +1,7 @@
 """Dual detector: the CNN (Titus's model) and AMD Token Factory vision model(s) look at the same image in
 parallel and their answers are compared. Switched on with DUAL_DETECTOR=on (default off).
 
-DUAL_MODE picks how the answers are combined (default `pair`, the original behaviour):
+DUAL_MODE picks how the answers are combined (default `vision_primary`, the recommended mode; the others stay selectable):
     pair         CNN + DUAL_VISION_MODEL. Same label -> automatic; different -> human review.
     unanimous    CNN + DUAL_VISION_MODEL + DUAL_VISION_MODEL_2. Automatic ONLY if all available detectors agree.
     vote         the same three; 2-of-3 wins automatically; a 3-way split -> human review.
@@ -127,6 +127,7 @@ def prepare_image_for_vision(path: str) -> tuple:
 
 
 MODES = ("pair", "unanimous", "vote", "cnn_anchored", "vision_primary")
+DEFAULT_MODE = "vision_primary"   # used whenever DUAL_DETECTOR is on and DUAL_MODE is not set (or not understood)
 
 
 def _low_confidence() -> float:
@@ -140,11 +141,11 @@ def _low_confidence() -> float:
 
 
 def mode() -> str:
-    """DUAL_MODE, default `pair`. An unknown value falls back to `pair` (never breaks the app)."""
-    m = os.getenv("DUAL_MODE", "pair").strip().lower()
+    """DUAL_MODE, default `vision_primary`. An unknown value falls back to the default (never breaks the app)."""
+    m = os.getenv("DUAL_MODE", DEFAULT_MODE).strip().lower()
     if m not in MODES:
-        log.warning("unknown DUAL_MODE %r; using pair", m)
-        return "pair"
+        log.warning("unknown DUAL_MODE %r; using %s", m, DEFAULT_MODE)
+        return DEFAULT_MODE
     return m
 
 

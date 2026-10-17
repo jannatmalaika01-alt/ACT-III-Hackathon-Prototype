@@ -123,7 +123,7 @@ Real mode is just keys in one git-ignored file. Mock mode keeps working for ever
 | You want | Uncomment | Then |
 |---|---|---|
 | AI-written recommendations | `TOKENFACTORY_BASE_URL`, `TOKENFACTORY_API_KEY` (model names have sensible defaults) | restart |
-| AI vision vote on photos | the key above, plus `DUAL_DETECTOR=on` and `DUAL_MODE=vision_primary` | restart |
+| AI vision vote on photos | the key above, plus `DUAL_DETECTOR=on` (the mode defaults to `vision_primary`; `DUAL_MODE` selects another) | restart |
 | Real Evolus tasks | `EVOLUS_MODE=rest`, `EVOLUS_API_KEY`, `EVOLUS_APPLICATION_ID`, `EVOLUS_WORKFLOW_ID` (switch the workflow on in Evolus) | restart; approving now takes minutes, the page shows progress |
 | A real database | `USE_IN_MEMORY_DB=false`, `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`; run `backend/supabase/migrations/001_init.sql` once | restart |
 

@@ -6,8 +6,8 @@ which was only a sanity check.
 ## Final decision
 
 **The demo uses `DUAL_MODE=vision_primary`: the two vision models (Qwen3.8-Flash-Next and Gemma-4-31B-IT) decide, and the
-CNN is only advisory.** In the code the default stays `pair`; the demo values are in `backend/.env.example`
-(`DUAL_DETECTOR=on`, `DUAL_MODE=vision_primary`, reasoning effort `none`). Rules of `vision_primary`:
+CNN is only advisory.** `DUAL_DETECTOR` itself defaults to off, but whenever it is on the mode defaults to `vision_primary` (the other modes stay selectable with `DUAL_MODE`); the demo values are in `backend/.env.example`
+(`DUAL_DETECTOR=on`, reasoning effort `none`). Rules of `vision_primary`:
 
 - The two vision models agree: that label is the answer, whatever the CNN says. If the CNN disagrees, it is shown as a low-trust
   **CNN dissent note** (label and confidence) in the result and the explanation. It does not trigger a review.
