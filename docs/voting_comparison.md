@@ -147,6 +147,78 @@ size (its slowest call, 156 s, is `img_12`, which was asked twice). Gemma's slow
 a little longer. The new run sent 4 photos at once, which can itself add queueing on the shared endpoint, so the two sets of
 latencies are not a clean before/after.
 
+### Held-out validation: 15 fresh photos
+
+**Setup.** `data/fresh_photos` (15 photos: 4 bearing_wear, 4 corrosion, 2 structural_crack, 5 normal; hand labels, same kind of Google images). The FINAL
+pipeline was run on them once, **and no prompt, rule or threshold was changed after seeing the result**: new prompt, 1024 px resize, `vision_primary` with the
+low-confidence tie rule. Answers are in `data/voting_answers_fresh.json` (git-ignored).
+
+| Scheme | Auto answers correct | SILENT wrong | CNN right but outvoted | CNN dissent noted | Human review (rate) | False alarms | Good flags (CNN was wrong) | Extra calls per upload | Latency avg / max |
+|---|---|---|---|---|---|---|---|---|---|
+| 0  CNN alone | 7 | **8** | 0 | - | 0 (0%) | 0 | 0 | 0 | 0.1s / 0.6s |
+| A  Pair: CNN + Flash-Next | 7 | **0** | 0 | - | 8 (53%) | 0 | 8 | 1 | 32.1s / 74.2s |
+| A' Pair: CNN + Gemma | 7 | **0** | 0 | - | 8 (53%) | 0 | 8 | 1 | 8.2s / 44.1s |
+| B  3-way vote (2-of-3) | 13 | **1** | 0 | - | 1 (7%) | 0 | 1 | 2 | 32.2s / 74.2s |
+| C  3-way vote, CNN outvoted -> review | 7 | **0** | 0 | - | 8 (53%) | 0 | 8 | 2 | 32.2s / 74.2s |
+| U  Unanimity (all must agree) | 7 | **0** | 0 | - | 8 (53%) | 0 | 8 | 2 | 32.2s / 74.2s |
+| V  Vision-primary (CNN advisory) | 13 | **1** | 0 | 7 | 1 (7%) | 0 | 1 | 2 | 32.2s / 74.2s |
+
+**Scheme V, every photo** (wrong answers marked):
+
+| Photo | Truth | CNN | Flash-Next | Gemma | Final answer | Verdict |
+|---|---|---|---|---|---|---|
+| fresh_01.jpg | bearing_wear | corrosion (0.47) | bearing_wear (0.85) | bearing_wear (0.92) | bearing_wear | ok (CNN dissent noted) |
+| fresh_02.jpg | bearing_wear | bearing_wear (0.74) | bearing_wear (0.95) | bearing_wear (0.98) | bearing_wear | ok |
+| fresh_03.jpg | bearing_wear | structural_crack (0.93) | bearing_wear (0.95) | bearing_wear (0.98) | bearing_wear | ok (CNN dissent noted) |
+| fresh_04.jpg | bearing_wear | bearing_wear (0.59) | bearing_wear (0.85) | bearing_wear (0.92) | bearing_wear | ok |
+| fresh_05.jpg | corrosion | corrosion (0.64) | corrosion (0.96) | corrosion (1.00) | corrosion | ok |
+| fresh_06.jpg | corrosion | corrosion (1.00) | corrosion (0.98) | corrosion (0.99) | corrosion | ok |
+| fresh_07.jpg | corrosion | corrosion (0.86) | corrosion (0.95) | corrosion (0.98) | corrosion | ok |
+| fresh_08.jpg | corrosion | corrosion (1.00) | corrosion (0.99) | corrosion (1.00) | corrosion | ok |
+| fresh_09.jpg | structural_crack | structural_crack (0.71) | structural_crack (0.95) | structural_crack (0.95) | structural_crack | ok |
+| fresh_10.jpg | structural_crack | bearing_wear (0.62) | structural_crack (0.95) | structural_crack (0.92) | structural_crack | ok (CNN dissent noted) |
+| fresh_13.jpg | normal | corrosion (0.66) | normal (0.95) | normal (0.95) | normal | ok (CNN dissent noted) |
+| fresh_14.jpg | normal | corrosion (0.90) | bearing_wear (0.85) | normal (0.95) | HUMAN REVIEW | review: 3-way split |
+| fresh_15.jpg | normal | bearing_wear (0.78) | normal (0.99) | normal (0.98) | normal | ok (CNN dissent noted) |
+| fresh_16.jpg | normal | bearing_wear (0.46) | normal (0.98) | normal (0.98) | normal | ok (CNN dissent noted) |
+| fresh_17.jpg | normal | corrosion (0.94) | bearing_wear (0.90) | bearing_wear (0.95) | bearing_wear | WRONG: other error |
+
+Wrong automatic answers: 1 (of which bearing_wear/corrosion confusions: 0).
+
+**Did the earlier 36/40 hold up? Roughly, yes, but 15 photos cannot say more.**
+
+| Scheme V | Photos | Answered automatically and correctly | Silently wrong | Sent to a person |
+|---|---|---|---|---|
+| Tuning set (40 photos, after the tie rule) | 40 | 36 (90%) | 1 (2.5%) | 3 (7.5%) |
+| Fresh photos (15 photos) | 15 | 13 (87%) | 1 (6.7%) | 1 (6.7%) |
+
+- One fresh photo is 6.7 percentage points. A 95% range for 13 out of 15 is roughly 62% to 96%, which includes the tuning-set result, so this neither
+  confirms nor contradicts it. The silent-wrong rate looks higher (6.7% against 2.5%), but that is one photo in each set.
+- **The CNN alone got 7 of 15 right (47%)** on the fresh photos (14 of 40, 35%, on the tuning set): it is still weak on real photos. Every scheme that uses the vision
+  models beats it; V and B answered 13 of 15 automatically.
+- **The one silent mistake, `fresh_17`, is a normal part that both vision models called bearing_wear.** The one photo sent to a person, `fresh_14`, is a normal part with
+  a three-way split. Together with `img_11`, `img_12` and `img_34` earlier, the hard cases are mostly photos labelled **normal** that look like they have wear:
+  the vision models lean towards finding a defect.
+- **The low-confidence tie rule was not exercised** on the fresh photos: no photo had the two vision models disagree while the CNN matched one of them. So this
+  validation says nothing about that rule; it rests on the 2 tuning-set photos described above.
+- Pair / unanimity / `cnn_anchored` again had 0 silent mistakes and again sent about half (53%) to a person; the CNN dissent note appeared on 7 of 15 photos.
+
+### How slow will the demo be? (10 single calls per model, one at a time)
+
+Measured with `backend/scripts/latency_check.py`: resized photos spread over `data/real_photos`, same function as the app, nothing else running, one call after another.
+
+| Model | Calls | Average | Slowest | Fastest | Errors |
+|---|---|---|---|---|---|
+| Qwen3.8-Flash-Next | 10 | 32.1s | 57.8s | 10.4s | 0 |
+| Gemma-4-31B-IT | 10 | 8.2s | 20.7s | 3.7s | 0 |
+
+Each call: Flash-Next 40.5s, 10.4s, 17.6s, 57.8s, 25.5s, 22.3s, 23.6s, 54.0s, 43.9s, 25.1s; Gemma 11.1s, 6.2s, 3.7s, 20.7s, 4.5s, 4.6s, 7.2s, 6.3s, 11.2s, 6.9s.
+
+The two vision models run side by side, so an upload waits for the slower one: **expect about 30 s on average and up to about a minute for the detectors, plus
+the text writer (MiMo-V2.6-Flash) afterwards.** Flash-Next is the bottleneck: Gemma alone would be about 8 s. Earlier runs with several photos at once saw Flash-Next
+at 37 to 46 s on average with slowest calls over 150 s (including one unusable answer that was asked twice), so a busy shared endpoint makes it worse. For the
+demo: upload one photo at a time, show the "analysing" state, and keep the 60 s per-detector timeout (a slow detector is left out and the other answers).
+
 ### Decision rule (amended once)
 
 The rule was written before any real-photo result:

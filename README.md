@@ -102,6 +102,7 @@ hand-made labels, so small differences are noise. The decision rule, its one ame
 - Our test images are synthetic (made by the same generator that trained the CNN) and there are only about 20 independent
   ones (each has 4 blurred, darkened, rotated or noisy copies). On them the second detector caught all of the CNN's mistakes,
   but real factory photos may behave differently. With 20 to 40 real photos only large differences can be seen.
+- **Speed:** measured one call at a time, Qwen3.8-Flash-Next takes about 32 s per photo (10 to 58 s) and Gemma-4-31B-IT about 8 s (4 to 21 s). The two run side by side, so a photo takes about 30 s and up to about a minute for the detectors, plus the text writer. See `docs/voting_comparison.md`.
 - Each upload spends one extra call (three modes: two) from the team's shared Token Factory quota (20 requests per minute
   for our key) and adds a few seconds.
 - Gemma-4-31B-IT and Qwen3.8-Flash-Next differ by amounts that are within noise on this test; Gemma was more accurate alone
