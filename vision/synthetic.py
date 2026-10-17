@@ -103,10 +103,16 @@ def generate(label: str, seed: int, style: str = "hard") -> Image.Image:
     return img
 
 
-def batch(labels: list, n_per_class: int, seed_offset: int, style_mix: Tuple[float, float] = (0.3, 0.7)):
-    """Yield (PIL image, class index-label) pairs; `style_mix` is the (clean, hard) share."""
+def batch(labels: list, n_per_class: int, seed_offset: int, style_mix: Tuple[float, float] = (0.3, 0.7),
+          degrade_prob: float = 0.0):
+    """Yield (PIL image, label) pairs. `style_mix` is the (clean, hard) share; `degrade_prob` is the share that also gets
+    random blur / darkness / rotation / noise (see vision/robustness.py)."""
+    from .robustness import random_degrade
     rng = random.Random(seed_offset)
     for lab in labels:
         for i in range(n_per_class):
             style = "clean" if rng.random() < style_mix[0] else "hard"
-            yield generate(lab, seed_offset + i, style), lab
+            img = generate(lab, seed_offset + i, style)
+            if rng.random() < degrade_prob:
+                img = random_degrade(img, rng)
+            yield img, lab

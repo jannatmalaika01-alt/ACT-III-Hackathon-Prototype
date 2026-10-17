@@ -9,6 +9,7 @@ EXPANSIONS = [
     (("corros", "rust", "oxid"), "corrosion rust oxide flakes surface pitting paint degradation wall loss treatment"),
     (("bolt", "fastener", "loose"), "loose bolt re-tighten torque fastener work order"),
     (("misalign",), "misalignment conveyor belt shaft laser alignment"),
+    (("normal", "no defect", "healthy"), "routine inspection rounds daily checks general overview"),
 ]
 
 

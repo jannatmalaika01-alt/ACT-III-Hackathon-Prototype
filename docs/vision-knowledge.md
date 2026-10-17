@@ -10,7 +10,7 @@ pip install -r requirements-vision.txt
 python run_pipeline.py                              # contract JSON for data/test/test_02.png
 python run_pipeline.py data/test_reports/s01_motor_vibration.csv
 python evaluate.py                                  # the Oct 9 test run (results below)
-python -m pytest vk_tests -q                        # 20 tests, includes the backend compatibility checks
+python -m pytest vk_tests -q                        # 49 tests, includes backend compatibility, citation and secret checks
 python -m vision.train                              # retrain the detector (about 3 minutes on CPU)
 ```
 Optional: install the Tesseract program for OCR of scanned PDFs, and `sentence-transformers` for semantic search.
@@ -39,25 +39,45 @@ required" instead of guessing.
 * Defect names: the contract uses readable names (`bearing wear`, `structural crack`, `corrosion`, `normal`). The retriever also
   understands the agent's names (`crack`, `loose_bolt`, `misalignment`).
 
-## Test run (Oct 9 note) - `python evaluate.py`
+## Test results (repeatable)
+`python evaluate.py --write-report` runs everything with fixed seeds and rewrites `docs/EVALUATION.md` (full per-file table) and
+`docs/eval_results.json`. Two runs give identical numbers. Summary of the last run (keyword-only retrieval, see limits):
+
 | Check | Result |
 |---|---|
-| Image detection, 10 original images | 10 of 10 |
-| Image detection, 10 held-out harder images (textured, noisy, blurred) | 10 of 10 |
-| Sensor reports | 4 of 4 |
-| Documents incl. one scanned PDF read by OCR | 5 of 5 |
-| Retrieval, correct manual page in top-1 / top-3 of 15 questions | 14 of 15 / 15 of 15 |
-| End to end: right defect AND top cited page is its procedure | 21 of 21 |
+| Detection, 20 test images (10 original + 10 held-out harder) | 20 of 20 |
+| Detection, sensor reports / documents (one scanned PDF via OCR) | 4 of 4 / 5 of 5 |
+| Stress set: blurred, darkened, rotated, noisy copies of 100 unseen images (400 total) | 394 of 400 (98%); old detector 306 of 400 (77%) |
+| Retrieval, right page in top-1 / top-3 of 30 questions | 28 of 30 / 29 of 30 |
+| Off-topic questions (bread, tax, cat...) correctly given no evidence | 10 of 10 |
+| Citations: every evidence chunk found verbatim on its cited PDF page, action copied from evidence | 29 of 29 |
+| End to end: right defect and the top cited page is its procedure | 21 of 21 |
 
-Retrieval ran in TF-IDF mode in this run (no internet for the MiniLM download). Run `python evaluate.py` on a machine with
-`sentence-transformers` to get the semantic-mode numbers; the first line prints which embedder was used.
+Citation checking lives in `knowledge/verify.py` (`verify_citation(manual, page)` for the agent's final answer,
+`verify_contract(contract)` for pipeline output); `vk_tests/test_citations_and_relevance.py` proves it catches a made-up manual,
+a wrong page, edited text and an invented action.
+
+## Real photos
+Put photos in a folder with a `labels.csv` (`filename,label`, labels `normal|bearing_wear|structural_crack|corrosion`; the same
+layout as `data/real_photos` used by `backend/scripts/real_photo_check.py`) and run
+`python evaluate.py --real-dir data/real_photos`. To teach the CNN from them, copy them into `data/train/<class>/` and run
+`python -m vision.train`.
+
+## Secrets
+Nothing in this folder contains credentials (checked by `vk_tests/test_no_secrets.py`). `knowledge/redact.py::redact()` masks keys,
+bearer tokens and `*_KEY=` / `*_SECRET=` / `*_TOKEN=` values; `push_to_backend.py` prints everything through it. Never commit `.env`.
 
 ## Honest limits
-* There is **no real photo set yet**. The detector is trained on generated images (`vision/synthetic.py`), and the test images
-  are generated too, so "20 of 20" shows the model and pipeline work, not accuracy on real factory photos. To fix that, put
-  real photos in `data/train/<normal|bearing_wear|structural_crack|corrosion>/` and run `python -m vision.train` (they are
-  mixed in automatically). Add real photos to `data/test/` and `data/test_cases.csv` to measure honestly.
-* The manuals are short synthetic samples written for the prototype (`setup_manuals.py`). Real PDFs dropped into `data/raw/`
-  are indexed automatically.
+* **No real factory photos were available**, so every image here, including the stress set, is generated. "98%" means the model
+  survives blur, darkness, rotation and noise on generated images; it is NOT accuracy on real photos, which is expected to be
+  lower. Run `--real-dir` with real photos before quoting a real number. The dual detector (vision-language model) exists for
+  exactly this gap.
+* Retrieval ran keyword-only (TF-IDF) because MiniLM could not be downloaded where this was tested. Paraphrased questions can miss
+  (2 of 30 here); run `python evaluate.py` where `sentence-transformers` is installed and check the `embedder:` line.
+* A hit must share at least two meaningful words with the query (or MiniLM must score it >= 0.40), so unrelated questions return no
+  evidence and the backend answers 422 "no relevant SOP" instead of citing a random page. A detection of "normal" retrieves routine
+  inspection guidance.
+* The manuals are short synthetic samples written for the prototype (`setup_manuals.py`). Real PDFs dropped into `data/raw/` are
+  indexed automatically, and citations are verified against whatever PDFs are there.
 * Sensor thresholds are typical values, not site-specific limits.
-* Detector confidence is below 0.70 for unclear images; the backend agent already routes those to human verification.
+* Detector confidence below 0.70 means a person should verify; the backend agent already routes those to human verification.
