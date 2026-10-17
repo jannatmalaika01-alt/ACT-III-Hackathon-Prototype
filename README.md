@@ -83,6 +83,8 @@ Ports already in use? `FRONTEND_PORT=3010 BACKEND_PORT=8010 docker compose up --
  5  EVOLUS      the approved case starts an Evolus workflow; the agent's answer is parsed and stored on the case
 ```
 
+The case page shows a **Detector votes** card (one row per detector with its label and confidence, failed ones marked, the outcome in one line, the CNN as an advisory note), an **"Unverified: needs human review"** headline with the candidate labels when the detectors disagree, and, after approval, the Evolus agent's answer.
+
 Design rules worth knowing: confidences from different models are **never averaged**; a detector or writer that fails or times out is simply left out
 (an upload never breaks); a manual citation is **checked**, never invented; at most one Evolus run per case at a time, and a timed-out run is **resumed** by Retry.
 
@@ -218,7 +220,11 @@ Last/                   an old copy of early backend files, not used
 Never commit `backend/.env` or any key; keys are server-side only and are never baked into an image (`.dockerignore` excludes every `.env`). Uploads are limited by type and size. The Evolus step is
 claimed once per case and its run id is kept, so an approval is never lost or duplicated by a retry.
 
-## Screenshots (from an earlier build; the layout is the same)
+## Screenshots
+
+Current build: [an UNVERIFIED case](docs/screenshots/09-unverified-needs-review.png) (no single defect is named, every candidate and who proposed it, the CNN as an advisory note) and [the Evolus agent's result card](docs/screenshots/10-evolus-agent-result.png) (severity, safety precautions, steps, citations with page and quote, task id, how long the agent took; this one shows the reply of a real Evolus run replayed by a local stand-in server, so its task id is not a real one).
+
+Earlier build (the layout is similar):
 
 [Login](docs/screenshots/01-login.png) · [Dashboard](docs/screenshots/02-dashboard.png) · [Upload](docs/screenshots/03-upload-page.png) · [Case details](docs/screenshots/04-case-details.png) ·
 [Detection results](docs/screenshots/05-detection-results.png) · [Approval](docs/screenshots/06-approval-workflow.png) · [Evolus task](docs/screenshots/07-evolus-task.png)

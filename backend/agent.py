@@ -127,7 +127,7 @@ def _confirm_action(defect: dict, ref: str) -> str:
         return (f"Manually verify the {defect['defect_type']} at {defect['location']}{ref} "
                 f"before taking any maintenance action.")
     listed = "; ".join(f"{label.replace('_', ' ')} (proposed by {', '.join(names)})" for label, names in cands)
-    return (f"A person must confirm which defect this is{ref} before any maintenance action. Candidates: {listed}. "
+    return (f"A person must confirm which defect this is before any maintenance action. Candidates: {listed}. "
             f"Do not act on any of them until one is confirmed by looking at the photo.")
 
 

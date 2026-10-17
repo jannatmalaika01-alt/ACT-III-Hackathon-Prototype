@@ -2,16 +2,19 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft, BookOpen, Check, Code2, Copy, ExternalLink, FileText, History, Loader2, RotateCcw, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, BookOpen, Check, Code2, Copy, ExternalLink, FileText, History, Loader2, RotateCcw, X } from "lucide-react";
 import Shell from "@/components/Shell";
 import Pipeline from "@/components/Pipeline";
 import EvolusProgress from "@/components/EvolusProgress";
+import DetectorVotes from "@/components/DetectorVotes";
+import EvolusResultCard from "@/components/EvolusResultCard";
 import { useToast } from "@/components/Toast";
 import { ConfidenceRing, SeverityBadge, StatusBadge } from "@/components/Badges";
 import { approveCase, fileUrl, getCase, rejectCase, retryTask } from "@/lib/api";
 import { getUser } from "@/lib/auth";
+import { answerSource, candidatesOf, dualOf, isUnverified, pct, pretty } from "@/lib/detectors";
 import { EVOLUS_URL, IS_MOCK } from "@/lib/config";
-import { evolusInProgress, hasDiagnosis, inputKind, LOW_CONFIDENCE, missingForApproval, shortId, type Case } from "@/lib/types";
+import { evolusInProgress, hasDiagnosis, inputKind, LOW_CONFIDENCE, missingForApproval, shortId, type Case, type EvolusResult } from "@/lib/types";
 
 export default function CasePage() {
   const { id } = useParams<{ id: string }>();
@@ -81,7 +84,12 @@ export default function CasePage() {
 
   const diag = hasDiagnosis(c);
   const missing = diag ? missingForApproval(c) : [];
-  const lowConf = diag && (c.confidence ?? 1) < LOW_CONFIDENCE;
+  const dual = dualOf(c);
+  const unverified = isUnverified(c);
+  const candidates = unverified ? candidatesOf(c) : [];
+  const evolusAnswer = c.diagnosis_raw?.evolus && "parsed" in c.diagnosis_raw.evolus ? (c.diagnosis_raw.evolus as EvolusResult) : null;
+  // With the vote card the "low confidence" banner would say the wrong thing about a case that is unverified because the detectors disagree
+  const lowConf = diag && !dual && (c.confidence ?? 1) < LOW_CONFIDENCE;
   const canDecide = c.status === "pending" && diag;
   const isImage = c.content_type.startsWith("image/");
   const rejection = c.approvals?.find((a) => a.decision === "rejected");
@@ -101,7 +109,9 @@ export default function CasePage() {
           <p className="text-xs text-slate-500">{inputKind(c.content_type)} · {c.file_name} · uploaded by {c.uploaded_by}</p>
         </div>
         <StatusBadge status={c.status} />
-        <SeverityBadge severity={c.severity} />
+        {unverified
+          ? <span className="inline-flex items-center rounded-full border border-amber-400/40 bg-amber-400/10 px-2.5 py-0.5 text-xs font-semibold text-amber-300">Unverified</span>
+          : <SeverityBadge severity={c.severity} />}
         <button onClick={() => setShowJson((v) => !v)}
           className="ml-auto flex items-center gap-1.5 rounded-md border border-white/10 px-3 py-1.5 text-xs text-slate-300 hover:bg-white/5">
           <Code2 className="h-3.5 w-3.5" /> Raw JSON
@@ -150,17 +160,49 @@ export default function CasePage() {
                   <FileText className="h-4 w-4" /> Open uploaded file
                 </a>
               )}
-              <div className="flex items-center gap-5">
-                <ConfidenceRing value={c.confidence} />
-                <div className="text-xl font-semibold capitalize">{c.defect?.replace("_", " ")}</div>
-              </div>
+              {unverified ? (
+                <div className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-4" data-testid="unverified-headline">
+                  <div className="flex items-center gap-2 text-xl font-semibold text-amber-200">
+                    <AlertTriangle className="h-5 w-5 shrink-0" /> Unverified: needs human review
+                  </div>
+                  <p className="mt-1 text-sm text-amber-100/80">
+                    No single defect is named here. A person must look at the file and decide which of these is right:
+                  </p>
+                  <ul className="mt-3 space-y-2">
+                    {candidates.map((cand) => (
+                      <li key={cand.label} className="rounded-md bg-black/20 px-3 py-2 text-sm" data-testid="candidate">
+                        <span className="font-semibold capitalize text-slate-100">{pretty(cand.label)}</span>
+                        <span className="text-slate-400"> proposed by </span>
+                        {cand.proposers.map((pr, i) => (
+                          <span key={pr.name}>{i > 0 && ", "}<span className="text-slate-200">{pr.name}</span>
+                            <span className="text-xs text-slate-500"> ({pct(pr.confidence)}{pr.advisory ? ", advisory" : ""})</span></span>
+                        ))}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : (
+                <div className="flex items-center gap-5">
+                  <ConfidenceRing value={c.confidence} />
+                  <div>
+                    <div className="text-xl font-semibold capitalize">{pretty(c.defect?.split(" at ")[0])}</div>
+                    {c.defect?.includes(" at ") && <div className="text-xs text-slate-400">at {c.defect.split(" at ").slice(1).join(" at ")}</div>}
+                    {dual && answerSource(dual) && (
+                      <div className="mt-1 text-xs text-slate-500">confidence of {answerSource(dual)}, the model that gave this answer</div>
+                    )}
+                  </div>
+                </div>
+              )}
               <p className="mt-4 text-sm leading-relaxed text-slate-300">{c.explanation}</p>
             </section>
+
+            {dual && <DetectorVotes d={dual} />}
 
             <section className="card animate-fade-up p-5">
               <h2 className="mb-4 flex items-center gap-2 text-sm font-semibold text-slate-300">
                 <BookOpen className="h-4 w-4" /> Source from manuals / SOPs
               </h2>
+              {unverified && <p className="mb-2 text-xs text-amber-300/80">This page belongs to the leading candidate ({pretty(c.diagnosis_raw?.defect_report?.defect_type ?? c.defect?.split(" at ")[0])}) only. Confirm the defect first.</p>}
               {/* INTEGRATION(TITUS): the backend stores one citation (manual and page). To show the exact
                   quote, add a source_excerpt field to DiagnosisIn and display it here. */}
               {c.source_manual && c.source_page ? (
@@ -171,6 +213,10 @@ export default function CasePage() {
                 <p className="text-sm text-red-300">No citation. A human must verify this recommendation.</p>
               )}
             </section>
+
+            {c.status === "task_created" && evolusAnswer && (
+              <EvolusResultCard taskId={c.evolus_task_id} result={evolusAnswer} evolusUrl={EVOLUS_URL || undefined} />
+            )}
           </div>
 
           <section className="card animate-fade-up h-fit space-y-4 p-5 lg:col-span-2 lg:sticky lg:top-6">

@@ -18,6 +18,61 @@ export interface CaseEvent {
   created_at: string;
 }
 
+// What one detector said. `error` is set (and `label` null) when it failed or timed out.
+export interface DetectorAnswer {
+  label: string | null;
+  confidence: number | null;
+  name?: string;
+  error?: string | null;
+}
+
+// The dual detector's result, stored by the backend in diagnosis_raw.dual_detector (backend/app/dual_detector.py).
+export interface DualDetector {
+  mode: string;                       // vision_primary (default) | pair | unanimous | vote | cnn_anchored
+  agreement: "agree" | "disagree" | "single_detector";
+  needs_human_review: boolean;
+  decision: string;                   // why: "vision models agree", "3-way split", ...
+  suggestion?: string;                // "2 of 3 say corrosion"
+  note?: string;
+  cnn: DetectorAnswer;
+  vision_model?: DetectorAnswer;
+  vision_model_2?: DetectorAnswer;
+  answer?: { label: string; confidence: number | null; from: string };
+  warnings?: string[];
+  cnn_dissent?: { label: string; confidence: number | null; trust: string; note?: string } | null;
+  cnn_tie?: { label: string; confidence: number | null; threshold: number; used: boolean } | null;
+}
+
+// The Evolus agent's reply, parsed by the backend (backend/app/evolus.py parse_agent_reply), in diagnosis_raw.evolus.
+export interface EvolusResult {
+  execution_id: string;
+  status?: string;
+  raw_text: string;
+  parsed: {
+    defect: string | null;
+    severity: string | null;
+    probable_cause: string | null;
+    safety_precautions: string[];
+    recommended_steps: string[];
+    citation: string[];
+    confidence: number | null;
+    confidence_text?: string | null;
+    needs_human_review: boolean;
+    summary: string | null;
+  };
+  notes: string[];
+  duration_seconds?: number;
+  evolus_seconds?: number | null;
+  resumed?: boolean;
+}
+
+export interface DiagnosisRaw {
+  needs_manual_verification?: boolean;
+  defect_report?: { defect_type?: string; location?: string; confidence?: number };
+  dual_detector?: DualDetector;
+  evolus?: Partial<EvolusResult> & { state?: string };
+}
+
 // INTEGRATION(KARIM, SUVE): mirrors one row of the "cases" table (backend/app/db.py).
 // The AI fields stay null until the AI pipeline posts a diagnosis (POST /cases/{id}/diagnosis).
 export interface Case {
@@ -42,6 +97,7 @@ export interface Case {
   evolus?: { running: boolean; started_at: string | null; execution_id: string | null };
   created_at: string;
   updated_at: string;
+  diagnosis_raw?: DiagnosisRaw | null;
   // Only present on GET /cases/{id}
   approvals?: Approval[];
   events?: CaseEvent[];
