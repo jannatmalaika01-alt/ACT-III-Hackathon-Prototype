@@ -19,6 +19,7 @@ ROOT = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, ROOT)
 
 from knowledge.pipeline import VisionKnowledgePipeline  # noqa: E402
+from knowledge.redact import redact  # noqa: E402
 
 CONTENT_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".pdf": "application/pdf",
                  ".csv": "text/csv", ".json": "application/json", ".txt": "text/plain"}
@@ -47,9 +48,9 @@ def main():
         if r.status_code in (404, 405):  # backend without /analyze
             r = api.post(f"/cases/{case_id}/diagnose", json=report)
         print("--- vision/knowledge contract ---")
-        print(json.dumps(contract, indent=2))
+        print(redact(json.dumps(contract, indent=2)))
         print(f"--- backend {r.status_code} ---")
-        print(json.dumps(r.json(), indent=2))
+        print(redact(json.dumps(r.json(), indent=2)))
         sys.exit(0 if r.status_code == 200 else 1)
 
 

@@ -1,5 +1,13 @@
 {
   "embedder": "tfidf",
+  "chunks_indexed": 19,
+  "ocr_available": true,
+  "detector": {
+    "trained_on": "synthetic only",
+    "train_images": 4800,
+    "degraded_share": 0.65,
+    "val_accuracy": 0.9733
+  },
   "detection": {
     "image": {
       "correct": 20,
@@ -14,13 +22,47 @@
       "total": 5
     }
   },
+  "skipped": [],
+  "stress": {
+    "clean": {
+      "correct": 100,
+      "total": 100
+    },
+    "blur": {
+      "correct": 98,
+      "total": 100
+    },
+    "dark": {
+      "correct": 99,
+      "total": 100
+    },
+    "rotate": {
+      "correct": 98,
+      "total": 100
+    },
+    "noise": {
+      "correct": 99,
+      "total": 100
+    }
+  },
+  "stress_hard_total": {
+    "correct": 394,
+    "total": 400
+  },
   "retrieval": {
-    "top1": 14,
-    "top3": 15,
-    "total": 15
+    "top1": 28,
+    "top3": 29,
+    "total": 30,
+    "off_topic_total": 10,
+    "off_topic_wrongly_answered": 0
+  },
+  "citations": {
+    "verified": 29,
+    "total": 29
   },
   "end_to_end": {
     "correct": 21,
     "total": 21
-  }
+  },
+  "repeatable": true
 }

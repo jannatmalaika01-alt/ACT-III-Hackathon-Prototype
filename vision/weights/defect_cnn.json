@@ -5,8 +5,10 @@
     "structural_crack",
     "corrosion"
   ],
-  "val_accuracy": 0.995,
-  "train_images": 2800,
+  "val_accuracy": 0.9733,
+  "train_images": 4800,
+  "degraded_share": 0.65,
+  "epochs": 20,
   "real_photos": 0,
   "trained_on": "synthetic only"
 }

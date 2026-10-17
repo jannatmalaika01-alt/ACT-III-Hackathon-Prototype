@@ -38,9 +38,9 @@ def _real_images():
     return xs, ys
 
 
-def _synthetic(per_class: int, offset: int):
+def _synthetic(per_class: int, offset: int, degrade_prob: float = 0.0):
     xs, ys = [], []
-    for img, lab in synthetic.batch(CLASSES, per_class, offset):
+    for img, lab in synthetic.batch(CLASSES, per_class, offset, degrade_prob=degrade_prob):
         xs.append(to_array(img))
         ys.append(CLASSES.index(lab))
     return xs, ys
@@ -89,25 +89,27 @@ def fit(xs, ys, vx, vy, epochs: int, lr: float):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--per-class", type=int, default=700)
-    ap.add_argument("--epochs", type=int, default=12)
+    ap.add_argument("--per-class", type=int, default=1200)
+    ap.add_argument("--epochs", type=int, default=20)
+    ap.add_argument("--degrade", type=float, default=0.65, help="share of training images that are blurred/darkened/rotated/noisy")
     ap.add_argument("--lr", type=float, default=2e-3)
     args = ap.parse_args()
 
     random.seed(0), np.random.seed(0), torch.manual_seed(0)
-    xs, ys = _synthetic(args.per_class, TRAIN_SEED)
+    xs, ys = _synthetic(args.per_class, TRAIN_SEED, args.degrade)
     rx, ry = _real_images()
     if rx:
         print(f"adding {len(rx)} real photos from data/train/ (x3 weight)")
         xs += rx * 3
         ys += ry * 3
-    vx, vy = _synthetic(150, VAL_SEED)
+    vx, vy = _synthetic(150, VAL_SEED, 0.5)  # validation also contains degraded images
     model, acc = fit(xs, ys, vx, vy, args.epochs, args.lr)
 
     os.makedirs(os.path.dirname(WEIGHTS), exist_ok=True)
     torch.save(model.state_dict(), WEIGHTS)
     with open(META, "w") as f:
-        json.dump({"classes": CLASSES, "val_accuracy": round(acc, 4), "train_images": len(xs), "real_photos": len(rx),
+        json.dump({"classes": CLASSES, "val_accuracy": round(acc, 4), "train_images": len(xs), "degraded_share": args.degrade, "epochs": args.epochs,
+                   "real_photos": len(rx),
                    "trained_on": "synthetic + real photos" if rx else "synthetic only"}, f, indent=2)
     print(f"saved {WEIGHTS}")
 
