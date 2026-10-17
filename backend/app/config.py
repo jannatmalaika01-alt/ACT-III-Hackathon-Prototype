@@ -25,7 +25,8 @@ class Settings:
     evolus_application_id: str = ""
     evolus_workflow_id: str = ""
     evolus_poll_interval: float = 5.0   # seconds between result checks (EVOLUS_POLL_INTERVAL)
-    evolus_poll_timeout: float = 240.0  # give up waiting for the agent after this long (EVOLUS_POLL_TIMEOUT)
+    evolus_poll_timeout: float = 600.0  # give up waiting for the agent after this long (EVOLUS_POLL_TIMEOUT)
+    evolus_background: bool = True      # rest mode: approving returns at once and the Evolus step runs in the background
 
 
 def _bool(value: str) -> bool:
@@ -48,5 +49,6 @@ def get_settings() -> Settings:
         evolus_application_id=os.getenv("EVOLUS_APPLICATION_ID", "").strip(),
         evolus_workflow_id=os.getenv("EVOLUS_WORKFLOW_ID", "").strip(),
         evolus_poll_interval=float(os.getenv("EVOLUS_POLL_INTERVAL", "5") or 5),
-        evolus_poll_timeout=float(os.getenv("EVOLUS_POLL_TIMEOUT", "240") or 240),
+        evolus_poll_timeout=float(os.getenv("EVOLUS_POLL_TIMEOUT", "600") or 600),
+        evolus_background=_bool(os.getenv("EVOLUS_BACKGROUND", "true")),
     )

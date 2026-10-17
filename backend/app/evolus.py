@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import re
 import time
+from datetime import datetime
 from typing import Any, Dict, List, Optional, Protocol
 
 import httpx
@@ -18,14 +19,19 @@ from .config import Settings
 
 
 class EvolusError(Exception):
-    """Raised when a task could not be created in Evolus."""
+    """Raised when a task could not be created in Evolus. `execution_id` is set when a run was already started, so a
+    retry can pick that run up again instead of starting a second one."""
+
+    def __init__(self, message: str, execution_id: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.execution_id = execution_id
 
 
 _sleep = time.sleep          # tests replace these two so they do not really wait
 _monotonic = time.monotonic
 
 POLL_INTERVAL = 5.0          # seconds between result checks
-POLL_TIMEOUT = 240.0         # give up after this long (the workflow takes about 2 minutes)
+POLL_TIMEOUT = 600.0         # give up after this long (measured: 245 s on one run, about 19 minutes on another)
 
 
 class TaskId(str):
@@ -36,8 +42,10 @@ class TaskId(str):
 
 
 class EvolusClient(Protocol):
-    def create_task(self, case: Dict[str, Any]) -> str:
-        """Create a task for an approved case and return Evolus's task id."""
+    def create_task(self, case: Dict[str, Any], resume_execution_id: Optional[str] = None, on_started=None) -> str:
+        """Create a task for an approved case and return Evolus's task id. Clients with `supports_resume` pick an earlier
+        execution up again when `resume_execution_id` is still Pending or Running, and call `on_started(execution_id)`
+        as soon as an execution exists."""
 
 
 SEVERITY_TO_PRIORITY = {"low": "low", "medium": "medium", "high": "high", "critical": "urgent"}
@@ -256,6 +264,17 @@ def parse_agent_reply(text: str) -> Dict[str, Any]:
     return {"raw_text": raw, "parsed": parsed, "notes": notes}
 
 
+def _evolus_seconds(execution: Dict[str, Any]) -> Optional[float]:
+    """The run's real duration by Evolus's own clock (completedAt - requestedAt), or None."""
+    def parse(v):
+        try:
+            return datetime.fromisoformat(re.sub(r"(\.\d{6})\d+", r"\1", str(v)).replace("Z", "+00:00"))
+        except (TypeError, ValueError):
+            return None
+    a, b = parse(execution.get("requestedAt")), parse(execution.get("completedAt"))
+    return round((b - a).total_seconds(), 1) if a and b else None
+
+
 def output_text(execution: Dict[str, Any]) -> str:
     """The agent's answer text from an execution record: `output`, else the last non-empty step output."""
     def flat(o) -> str:
@@ -293,7 +312,9 @@ class MockEvolusClient:
         """Make the next n create_task() calls fail (used by tests)."""
         self._fail_remaining = n
 
-    def create_task(self, case: Dict[str, Any]) -> str:
+    supports_resume = False
+
+    def create_task(self, case: Dict[str, Any], resume_execution_id: Optional[str] = None, on_started=None) -> str:
         if self._fail_remaining > 0:
             self._fail_remaining -= 1
             raise EvolusError("Evolus unavailable (simulated failure)")
@@ -309,9 +330,12 @@ class RestEvolusClient:
        (text from build_evolus_input). Evolus answers 202 with {jobId, executionId, enqueuedAt, traceId} and the header
        X-Workflow-Execution-Id.
     2. GET {base}/workflows/{workflow_id}/executions/{executionId} every `poll_interval` seconds (5) until `status` is
-       Completed or Failed, for at most `poll_timeout` seconds (240). Statuses seen: Pending, Running, Completed, Failed.
+       Completed or Failed, for at most `poll_timeout` seconds (600). Statuses seen: Pending, Running, Completed, Failed.
     3. The agent's text (`output`) is parsed by parse_agent_reply; create_task returns a TaskId (the execution id) whose
        `.result` holds the raw text and the parsed fields.
+    Resume: create_task(case, resume_execution_id=...) first looks ONCE at that earlier run. Pending/Running: keep waiting for
+    it (no second run); Completed: use its answer; Failed or unknown: start a new run. `on_started(execution_id)` is called as
+    soon as a run exists, so the caller can remember it.
 
     Any failure (config, network, auth, 4xx/5xx, a Failed run, no answer within the timeout) raises EvolusError, so the case
     becomes task_failed and can be retried. The API key is never put in an error message."""
@@ -330,23 +354,59 @@ class RestEvolusClient:
     def _headers(self) -> Dict[str, str]:
         return {"X-ApiKey": self.api_key, "X-Application-Id": self.application_id}
 
-    def create_task(self, case: Dict[str, Any]) -> str:
+    supports_resume = True
+
+    def create_task(self, case: Dict[str, Any], resume_execution_id: Optional[str] = None, on_started=None) -> str:
         missing = [n for n, v in (("EVOLUS_API_KEY", self.api_key), ("EVOLUS_APPLICATION_ID", self.application_id),
                                   ("EVOLUS_WORKFLOW_ID", self.workflow_id)) if not v]
         if missing:
             raise EvolusError("Evolus is not configured: set " + ", ".join(missing))
         started = _monotonic()
-        execution_id = self._start(build_evolus_input(case))
-        execution = self._wait(execution_id)
+        execution_id, resumed, previous, execution = None, False, None, None
+        if resume_execution_id:
+            # Pending / Running -> keep waiting for that run; Completed -> use its answer; Failed or unknown -> a new run
+            state, body = self._peek(resume_execution_id)
+            if state in ("running", "completed"):
+                execution_id, resumed = resume_execution_id, True
+                execution = body if state == "completed" else None
+            else:
+                previous = resume_execution_id
+        if execution_id is None:
+            execution_id = self._start(build_evolus_input(case))
+        if on_started:
+            on_started(execution_id)
+        if execution is None:
+            execution = self._wait(execution_id)
         text = output_text(execution)
         result = parse_agent_reply(text)
         if not text.strip():
             result["notes"].insert(0, "Evolus finished but returned no answer text")
-        result.update(execution_id=execution_id, status=execution.get("status"),
-                      duration_seconds=round(_monotonic() - started, 1))
+        result.update(execution_id=execution_id, status=execution.get("status"), resumed=resumed,
+                      previous_execution_id=previous, duration_seconds=round(_monotonic() - started, 1),
+                      evolus_seconds=_evolus_seconds(execution))
         task = TaskId(execution_id)
         task.result = result
         return task
+
+    RUNNING = ("pending", "queued", "enqueued", "running", "processing", "inprogress", "waiting", "scheduled")
+
+    def _peek(self, execution_id: str):
+        """ONE look at an earlier execution: ("running" | "completed" | "failed" | "unknown", record)."""
+        try:
+            resp = httpx.get(f"{self.base_url}/workflows/{self.workflow_id}/executions/{execution_id}",
+                             headers=self._headers, timeout=self.timeout)
+            if resp.status_code != 200:
+                return "unknown", {}
+            body = resp.json()
+        except (httpx.HTTPError, ValueError):
+            return "unknown", {}
+        body = body if isinstance(body, dict) else {}
+        state = re.sub(r"[^a-z]", "", str(body.get("status") or "").lower())
+        if state == "completed":
+            return "completed", body
+        if state in self.FAILED:
+            return "failed", body
+        return ("running", body) if state in self.RUNNING else ("unknown", body)
 
     def _start(self, text: str) -> str:
         try:
@@ -379,13 +439,13 @@ class RestEvolusClient:
             else:
                 code = resp.status_code
                 if code in (401, 403):
-                    raise EvolusError(f"Evolus rejected the credentials while waiting for the result (HTTP {code})")
+                    raise EvolusError(f"Evolus rejected the credentials while waiting for the result (HTTP {code})", execution_id)
                 if code == 404:
-                    raise EvolusError(f"Evolus does not know execution {execution_id} (HTTP 404)")
+                    raise EvolusError(f"Evolus does not know execution {execution_id} (HTTP 404)", execution_id)
                 if code == 429 or code >= 500:
                     transient, last_problem = transient + 1, f"HTTP {code}"
                 elif code >= 400:
-                    raise EvolusError(f"Evolus returned HTTP {code} while waiting for the result")
+                    raise EvolusError(f"Evolus returned HTTP {code} while waiting for the result", execution_id)
                 else:
                     transient = 0
                     try:
@@ -400,12 +460,12 @@ class RestEvolusClient:
                     if state in self.FAILED:
                         why = body.get("error")
                         why = why if isinstance(why, str) else (json.dumps(why) if why else "no reason given")
-                        raise EvolusError(f"Evolus execution {execution_id} {last_status.lower()}: {why[:200]}")
+                        raise EvolusError(f"Evolus execution {execution_id} {last_status.lower()}: {why[:200]}", execution_id)
             if transient > self.MAX_TRANSIENT:
-                raise EvolusError(f"Evolus stopped answering while waiting for execution {execution_id} ({last_problem})")
+                raise EvolusError(f"Evolus stopped answering while waiting for execution {execution_id} ({last_problem})", execution_id)
             if _monotonic() >= deadline:
                 raise EvolusError(f"Evolus did not finish within {self.poll_timeout:g} s: execution {execution_id} "
-                                  f"is still {last_status or 'unknown'}")
+                                  f"is still {last_status or 'unknown'}. Retry will pick that run up again.", execution_id)
             _sleep(self.poll_interval)
 
     def _find_id(self, resp) -> Optional[str]:

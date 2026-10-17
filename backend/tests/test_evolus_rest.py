@@ -132,12 +132,13 @@ def test_polls_every_5_seconds_until_completed_and_returns_the_parsed_answer(htt
     assert r["duration_seconds"] == 15.0
 
 
-def test_times_out_after_240_seconds_with_a_clear_error(http):
+def test_times_out_after_600_seconds_with_a_clear_error(http):
     http["polls"] = [Resp(200, execution("Running"))]
     with pytest.raises(EvolusError) as e:
         client().create_task(CASE)
-    assert "did not finish within 240 s" in str(e.value) and "ex-1" in str(e.value) and "Running" in str(e.value)
-    assert http["clock"] == 240.0 and len(http["gets"]) == 49          # 0, 5, ... 240
+    assert "did not finish within 600 s" in str(e.value) and "ex-1" in str(e.value) and "Running" in str(e.value)
+    assert "Retry will pick that run up again" in str(e.value) and e.value.execution_id == "ex-1"
+    assert http["clock"] == 600.0 and len(http["gets"]) == 121         # 0, 5, ... 600
 
 
 def test_the_timeout_and_interval_are_configurable(http):
@@ -253,7 +254,8 @@ def test_mode_selection_and_polling_settings():
     c = build_evolus_client(Settings(evolus_mode="rest", evolus_poll_interval=2.0, evolus_poll_timeout=30.0, **base))
     assert isinstance(c, RestEvolusClient) and (c.poll_interval, c.poll_timeout) == (2.0, 30.0)
     default = build_evolus_client(Settings(evolus_mode="rest", **base))
-    assert (default.poll_interval, default.poll_timeout) == (5.0, 240.0)
+    assert (default.poll_interval, default.poll_timeout) == (5.0, 600.0)
+    assert Settings(evolus_mode="rest", **base).evolus_background is True       # rest mode runs the Evolus step in the background
     assert isinstance(build_evolus_client(Settings(evolus_mode="mock", **base)), evolus.MockEvolusClient)
 
 
@@ -265,7 +267,8 @@ def app_client(http):
     from app.db import InMemoryRepo
     from app.main import create_app
     settings = Settings(supabase_url="", supabase_key="", storage_bucket="b", webhook_secret="s", evolus_mode="rest",
-                        evolus_mock_fail_first_n=0, max_upload_mb=1, use_memory_db=True)
+                        evolus_mock_fail_first_n=0, max_upload_mb=1, use_memory_db=True,
+                        evolus_background=False)   # these tests check the outcome of approve itself, so run it in the request
     tc = TestClient(create_app(settings=settings, repo=InMemoryRepo(), evolus=client()))
     case = tc.post("/cases", files={"file": ("a.png", b"x", "image/png")}, data={"uploaded_by": "t"}).json()
     tc.post(f"/cases/{case['id']}/diagnosis", json={
@@ -293,7 +296,7 @@ def test_a_timeout_marks_the_case_task_failed_and_retry_works(app_client, http):
     r = tc.post(f"/cases/{cid}/approve", json={"decided_by": "boss"})
     assert r.status_code == 200                                         # never crashes the request
     body = r.json()
-    assert body["status"] == "task_failed" and "did not finish within 240 s" in body["task_error"] and body["task_attempts"] == 1
+    assert body["status"] == "task_failed" and "did not finish within 600 s" in body["task_error"] and body["task_attempts"] == 1
     http["polls"] = [done()]
     again = tc.post(f"/cases/{cid}/retry-task").json()
     assert again["status"] == "task_created" and again["diagnosis_raw"]["evolus"]["parsed"]["severity"] == "high"

@@ -160,7 +160,7 @@ def create_app(settings: Optional[Settings] = None, repo=None, evolus=None) -> F
     settings = settings or get_settings()
     repo = repo if repo is not None else build_repo(settings)
     evolus = evolus if evolus is not None else build_evolus_client(settings)
-    service = CaseService(repo, evolus)
+    service = CaseService(repo, evolus, background=(settings.evolus_mode == "rest" and settings.evolus_background))
 
     app = FastAPI(title="AI Factory Maintenance Agent - Backend", version="0.1.0")
     app.state.settings, app.state.repo, app.state.evolus, app.state.service = settings, repo, evolus, service

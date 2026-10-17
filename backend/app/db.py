@@ -62,6 +62,11 @@ class SupabaseRepo:
         res = self._t("cases").update(fields).eq("id", case_id).eq("status", "pending").execute()
         return res.data[0] if res.data else None
 
+    def update_fields(self, case_id: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Change columns (for example the jsonb diagnosis_raw) WITHOUT a status transition."""
+        res = self._t("cases").update(fields).eq("id", case_id).execute()
+        return res.data[0] if res.data else None
+
     def transition_case(self, case_id: str, from_status: str, to_status: str,
                         fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         res = (self._t("cases").update({**fields, "status": to_status})
@@ -138,6 +143,14 @@ class InMemoryRepo:
     def set_diagnosis(self, case_id: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         row = self.cases.get(case_id)
         if row is None or row["status"] != "pending":
+            return None
+        row.update(fields)
+        row["updated_at"] = _now()
+        return copy.deepcopy(row)
+
+    def update_fields(self, case_id: str, fields: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        row = self.cases.get(case_id)
+        if row is None:
             return None
         row.update(fields)
         row["updated_at"] = _now()
