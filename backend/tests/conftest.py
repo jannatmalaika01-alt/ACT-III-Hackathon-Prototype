@@ -20,6 +20,9 @@ def no_real_llm(monkeypatch):
     monkeypatch.setattr(dotenv, "load_dotenv", lambda *a, **k: False)
     for name in LLM_ENV:
         monkeypatch.delenv(name, raising=False)
+    # With no key the app uses the offline template writer. The older tests assert what the LLM paths do, so they switch it off;
+    # tests/test_offline_writer.py turns it on.
+    monkeypatch.setenv("OFFLINE_WRITER", "off")
 
 
 @pytest.fixture

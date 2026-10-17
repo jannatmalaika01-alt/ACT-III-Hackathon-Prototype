@@ -183,6 +183,9 @@ Based ONLY on these excerpts, explain what this defect means and propose one spe
 Reply with ONLY a JSON object, no other text:
 {{"explanation": "...", "recommended_action": "...", "severity": "low|medium|high|critical", "source_index": <number of the excerpt you relied on>, "evidence_quote": "<5-25 words copied EXACTLY from that excerpt that support your action>"}}"""
 
+    if getattr(core, "offline_writer_active", lambda: False)():
+        return _offline_recommendation(defect, docs)  # no LLM key at all: copy the manual's own action step (labelled)
+
     primary = _attempt(call_llm, core.primary_text_model(), "primary", prompt, docs, retry_invalid_json=True)
     attempts = [primary]
     winner = primary if primary["ok"] else None
@@ -215,6 +218,53 @@ Reply with ONLY a JSON object, no other text:
             "explanation": (str(data.get("explanation") or winner["output"] or "No explanation returned by the model.").strip()
                             + _detector_notes(defect) + f" ({written_by})"),
             "recommended_action": str(data.get("recommended_action") or "Schedule a manual inspection.").strip(),
+            "source_manual": source["manual"],
+            "source_page": source["page"],
+        },
+    }
+
+
+_ACTION = re.compile(r"Action Required:\s*(.+?)(?:\s*Priority:\s*(\w+)\.?)?\s*$", re.S)
+_PRIORITY_TO_SEVERITY = {"low": "low", "medium": "medium", "high": "high", "critical": "critical"}
+
+
+def _offline_recommendation(defect: dict, docs: list) -> dict:
+    """No LLM is configured (so the app can run with no keys): the recommendation is the 'Action Required' step copied from the
+    first retrieved manual passage that has one. It is labelled as a template, not an AI answer, and the quote is verified by
+    construction. If no passage has an action step, the case is flagged for a person."""
+    source, action, priority = docs[0], None, None
+    if re.sub(r"[^a-z]", "", str(defect["defect_type"]).lower()) in ("normal", "nodefect"):
+        action, priority = "No defect was detected: continue the routine inspection rounds and look again if anything seems off.", "low"
+        docs = []  # a repair step copied from a nearby manual page would be misleading for a part that looks fine
+    for d in docs:
+        m = _ACTION.search(d["text"])
+        if m:
+            source, action, priority = d, " ".join(m.group(1).split()), (m.group(2) or "").lower()
+            break
+    quote = " ".join(action.split()[:25]) if action and docs else ""
+    written_by = "written by an offline template from the manual (no LLM is configured)"
+    if action and not docs:
+        explanation = ("Template text, not written by an AI model (no LLM key is configured): the detector reports no defect, "
+                       "so no repair step is proposed.")
+    elif action:
+        explanation = (f"Template text, not written by an AI model (no LLM key is configured): the detector reports "
+                       f"{defect['defect_type']}, and the recommended action below is the 'Action Required' step copied from "
+                       f"{source['manual']}, page {source['page']}.")
+    else:
+        explanation = (f"Template text, not written by an AI model (no LLM key is configured): the detector reports "
+                       f"{defect['defect_type']}, but the retrieved manual pages have no 'Action Required' step, so a person "
+                       f"must read {source['manual']}, page {source['page']}.")
+    return {
+        "llm_output": None,
+        **({} if action else {"needs_review": True}),
+        "grounding": {"evidence_quote": quote or None, "evidence_quote_verified": bool(quote) and _quote_in_source(quote, source["text"]),
+                      "json_retried": False, "json_valid": True,
+                      "writer": {"model": None, "role": "offline", "written_by": written_by, "attempts": []}},
+        "diagnosis": {
+            "defect": f"{defect['defect_type']} at {defect['location']}",
+            "severity": _PRIORITY_TO_SEVERITY.get(priority or "", "medium"),
+            "explanation": explanation + _detector_notes(defect) + f" ({written_by})",
+            "recommended_action": action or f"Review the cited manual page ({source['manual']}, page {source['page']}) and decide the maintenance action.",
             "source_manual": source["manual"],
             "source_page": source["page"],
         },

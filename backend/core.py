@@ -102,10 +102,19 @@ def _providers() -> list:
     return out
 
 
+def offline_writer_active() -> bool:
+    """True when NO LLM provider is configured and OFFLINE_WRITER is not "off": the agent then writes the recommendation
+    from the manual's own "Action Required" step (a labelled template, not an AI answer), so the app works with no keys."""
+    off = os.getenv("OFFLINE_WRITER", "auto").strip().lower() in ("off", "false", "0", "no")
+    return not off and not _providers()
+
+
 def llm_status() -> dict:
     """Provider/model for /health: the one that last answered, else the first one configured."""
     if LAST_LLM.get("provider"):
         return {"provider": LAST_LLM["provider"], "model": LAST_LLM["model"], "answered": True}
+    if offline_writer_active():
+        return {"provider": "offline", "model": "template from the manuals (no LLM key configured)", "answered": False}
     first = (_providers() or [{}])[0]
     return {"provider": first.get("name"), "model": first.get("model"), "answered": False}
 
