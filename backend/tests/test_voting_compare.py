@@ -171,8 +171,9 @@ def test_consistency_check_reports_mismatches_on_other_data():
 def test_render_contains_the_decision_rule_and_a_silent_wrong_column():
     out = vc.render(FAKE)
     assert "SILENT wrong" in out and "Decision rule" in out
-    assert "written BEFORE any real-photo result" in out and "KEEP `pair`" in out
-    assert "U  Unanimity" in out and "A' Pair: CNN + Gemma" in out and "CNN right but silently outvoted" in out
+    assert "written BEFORE any real-photo result" in out and "AMENDED" in out and "KEEP the current mode" in out
+    assert "U  Unanimity" in out and "V  Vision-primary" in out and "A' Pair: CNN + Gemma" in out
+    assert "CNN right but outvoted" in out and "CNN dissent noted" in out
 
 
 # ---------------- Phase 2: collect, save, replay ----------------
@@ -274,3 +275,66 @@ def test_photos_and_saved_answers_are_git_ignored():
     text = (root / ".gitignore").read_text()
     assert "data/real_photos/" in text and "data/voting_answers" in text
     assert vc.DEFAULT_ANSWERS == root / "data" / "voting_answers.json"
+
+
+# ---------------- scheme V (vision-primary) ----------------
+
+def test_scheme_V_rules():
+    assert vc.decide("V", L(N, C, C)) ["label"] == C and vc.decide("V", L(N, C, C))["dissent"] is True
+    assert vc.decide("V", L(C, C, C))["dissent"] is False
+    assert vc.decide("V", L(N, C, N))["label"] == N            # the CNN breaks the tie
+    assert vc.decide("V", L(B, C, N))["reason"] == "3-way split"
+    assert vc.decide("V", L(N, C, None))["status"] == "review"  # one vision model failed, the other disagrees with the CNN
+    assert vc.decide("V", L(C, C, None))["label"] == C
+    assert vc.decide("V", L(C, None, None))["status"] == "review"  # both vision models failed: CNN alone is unverified
+    assert vc.decide("V", L())["status"] == "review"
+
+
+def test_scheme_V_scores_and_counts_dissent():
+    s = vc.score(FAKE, "V")
+    # img1 ok; img2 vision C,C vs CNN N -> auto C, dissent noted (ok); img3 vision N,N vs CNN C -> auto N (wrong, silent,
+    # CNN was right and is only noted); img4 3-way split -> review; img5 all N (wrong, silent); img6 Gemma missing, flash+CNN agree
+    assert (s["auto_correct"], s["silent_wrong"], s["review"]) == (3, 2, 1)
+    assert s["dissent_noted"] == 2 and s["extra_calls"] == 2 and s["silent_outvote"] == 1
+
+
+def test_table_has_a_V_row_and_the_dissent_column():
+    out = vc.render(FAKE)
+    row = next(line for line in out.splitlines() if line.startswith("| V  Vision-primary"))
+    assert row.split("|")[5].strip() == "2"          # CNN dissent noted
+    other = next(line for line in out.splitlines() if line.startswith("| A  Pair"))
+    assert other.split("|")[5].strip() == "-"
+
+
+def test_per_photo_list_marks_wrong_answers_and_the_bearing_corrosion_confusion():
+    ims = [img(C, C, C, C), img(B, C, C, C), img(C, N, N, N), img(N, B, B, C, variant="real"), img(C, B, None, None)]
+    ims[1]["truth"] = B   # truth bearing_wear, everybody says corrosion: the bearing/corrosion confusion
+    out = vc.per_photo(ims, "V")
+    assert out.count("WRONG: bearing_wear/corrosion CONFUSION") == 1
+    assert "WRONG: other error" in out and "ok" in out and "HUMAN REVIEW" in out
+    assert "Wrong automatic answers: 3 (of which bearing_wear/corrosion confusions: 1)." in out
+    assert "| Photo | Truth | CNN | Flash-Next | Gemma | Final answer | Verdict |" in out
+
+
+def test_latency_table_compares_before_and_after():
+    def im(fl, gl, ferr=None):
+        d = img(C, C, C, C)
+        d["answers"]["flash"] = {"label": None if ferr else C, "confidence": 0.9, "latency": fl, "error": ferr}
+        d["answers"]["gemma"] = {"label": C, "confidence": 0.9, "latency": gl, "error": None}
+        return d
+    out = vc.latency_table([im(40.0, 10.0), im(60.0, 20.0, "ValueError")], [im(8.0, 6.0), im(12.0, 10.0)])
+    flash = next(line for line in out.splitlines() if line.startswith("| Qwen3.8-Flash-Next"))
+    assert "50.0s / 60.0s" in flash and "10.0s / 12.0s" in flash and "40.0s -> 10.0s" in flash and "ValueError x1" in flash
+    gemma = next(line for line in out.splitlines() if line.startswith("| Gemma"))
+    assert "15.0s / 20.0s" in gemma and "8.0s / 10.0s" in gemma
+
+
+def test_replay_only_with_per_photo_and_baseline_makes_no_api_call(tmp_path, monkeypatch, capsys):
+    old, new = tmp_path / "old.json", tmp_path / "new.json"
+    vc.save_answers(old, [img(C, C, C, C, variant="real")], {})
+    vc.save_answers(new, [img(C, N, C, C, variant="real")], {})
+    monkeypatch.setattr(dd, "run_vision_model", lambda p: pytest.fail("replay must not call the API"))
+    assert vc.main(["--replay-only", "--answers", str(new), "--per-photo", "V", "--baseline", str(old)]) == 0
+    out = capsys.readouterr().out
+    assert "Per photo, scheme V" in out and "Latency of the vision models, before and after" in out
+    assert json.loads(old.read_text())["images"][0]["answers"]["cnn"]["label"] == C   # the baseline file is only read

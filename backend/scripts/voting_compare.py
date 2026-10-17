@@ -7,6 +7,8 @@ this replay and DUAL_MODE can never drift apart.
     C  CNN always counts: like B, but if the two vision models agree with each other and OUTVOTE the CNN, the case
        goes to human review instead of being decided silently.
     U  Unanimity: CNN, Flash-Next and Gemma. Automatic ONLY if all available detectors agree; any disagreement -> review.
+    V  Vision-primary: Flash-Next and Gemma decide; the CNN only breaks a tie between them. If they agree that label
+       wins and a disagreeing CNN is just a low-trust note ("CNN dissent noted"), not a review.
     (also reported: the pair CNN + Gemma-4-31B-IT)
     A detector with no answer for an image is MISSING: with 2 voters left, agreement wins and disagreement -> review;
     with 1 left it answers alone (like single_detector in the app); with 0 the case goes to review.
@@ -44,18 +46,20 @@ SCHEMES = [  # key, title, detectors that must be called (parallel), extra API c
     ("B", "B  3-way vote (2-of-3)", ("cnn", "flash", "gemma"), 2),
     ("C", "C  3-way vote, CNN outvoted -> review", ("cnn", "flash", "gemma"), 2),
     ("U", "U  Unanimity (all must agree)", ("cnn", "flash", "gemma"), 2),
+    ("V", "V  Vision-primary (CNN advisory)", ("cnn", "flash", "gemma"), 2),
 ]
-MODE_OF = {"B": "vote", "C": "cnn_anchored", "U": "unanimous"}  # scheme -> app DUAL_MODE (A / A' are `pair`)
+MODE_OF = {"B": "vote", "C": "cnn_anchored", "U": "unanimous", "V": "vision_primary"}  # scheme -> app DUAL_MODE (A / A' are `pair`)
 DEFAULT_ANSWERS = REPO / "data" / "voting_answers.json"
 _sleep = time.sleep  # tests replace this
 
-DECISION_RULE = """Decision rule (written BEFORE any real-photo result was seen):
+DECISION_RULE = """Decision rule (written BEFORE any real-photo result; rule (b) AMENDED after the first real-photo run, see below):
  (a) The scheme with the fewest SILENT wrong answers wins.
- (b) A scheme where the vision models outvote a CNN that was right is OUT, unless that case is flagged for a human
-     (the column 'CNN right but silently outvoted' must be 0).
+ (b) A scheme where the vision models outvote a CNN that was right is OUT, unless that case is flagged for a human.
+     AMENDED: a CNN dissent that is shown as a low-trust NOTE (scheme V) no longer counts as a silent override, because the CNN
+     (trained on drawings) was right on only 14 of 40 real photos; for the other schemes (b) is unchanged.
  (c) Among ties, the lowest human-review rate wins.
  (d) Extra calls only matter if the average latency exceeds about 12 s or the slowest exceeds about 45 s.
- (e) If the results are too close or too noisy with this few photos, KEEP `pair` (the default).
+ (e) If the results are too close or too noisy with this few photos, KEEP the current mode.
  With 20-40 photos only LARGE differences can be seen; a gap of 1 to 3 photos is noise."""
 
 
@@ -92,6 +96,8 @@ def score(images: list, scheme_key: str) -> dict:
         truth = im["truth"]
         if r["status"] == "auto":
             c["auto_correct" if r["label"] == truth else "silent_wrong"] += 1
+            if r.get("dissent"):
+                c["dissent_noted"] += 1  # vision_primary: the CNN disagreed with the final answer and was only noted
             # the CNN was right, both vision models agreed on another label, and the scheme went with them silently
             if (r["label"] != truth and labels["cnn"] == truth and labels["flash"] and labels["flash"] == labels["gemma"]
                     and labels["flash"] != labels["cnn"]):
@@ -105,7 +111,7 @@ def score(images: list, scheme_key: str) -> dict:
                 c["review_outvoted"] += 1
     n = len(images)
     return {"scheme": scheme_key, "title": scheme[1], "n": n, "auto_correct": c["auto_correct"],
-            "silent_wrong": c["silent_wrong"], "silent_outvote": c["silent_outvote"], "review": c["review"], "review_rate": c["review"] / n if n else 0.0,
+            "silent_wrong": c["silent_wrong"], "silent_outvote": c["silent_outvote"], "dissent_noted": c["dissent_noted"], "review": c["review"], "review_rate": c["review"] / n if n else 0.0,
             "false_alarm": c["false_alarm"], "good_flag": c["good_flag"], "extra_calls": scheme[3],
             "lat_avg": sum(lats) / n if n else 0.0, "lat_max": max(lats) if lats else 0.0}
 
@@ -305,11 +311,13 @@ def render(images: list, title_note: str = "") -> str:
             continue
         facts = dataset_facts(subset)
         out += [f"### {gname.capitalize()} ({len(subset)} images)", "",
-                "| Scheme | Auto answers correct | SILENT wrong | CNN right but silently outvoted | Human review (rate) | False alarms "
-                "| Good flags (CNN was wrong) | Extra calls per upload | Latency avg / max |", "|---|---|---|---|---|---|---|---|---|"]
+                "| Scheme | Auto answers correct | SILENT wrong | CNN right but outvoted | CNN dissent noted | Human review (rate) "
+                "| False alarms | Good flags (CNN was wrong) | Extra calls per upload | Latency avg / max |",
+                "|---|---|---|---|---|---|---|---|---|---|"]
         for key, *_ in SCHEMES:
             s = score(subset, key)
-            out.append(f"| {s['title']} | {s['auto_correct']} | **{s['silent_wrong']}** | {s['silent_outvote']} | {s['review']} "
+            out.append(f"| {s['title']} | {s['auto_correct']} | **{s['silent_wrong']}** | {s['silent_outvote']} | "
+                       f"{s['dissent_noted'] if key == 'V' else '-'} | {s['review']} "
                        f"({100 * s['review_rate']:.0f}%) | {s['false_alarm']} | {s['good_flag']} | {s['extra_calls']} | "
                        f"{s['lat_avg']:.1f}s / {s['lat_max']:.1f}s |")
         out += ["", f"Facts about these images: 3-way splits (all three detectors answered, three different labels): "
@@ -320,6 +328,56 @@ def render(images: list, title_note: str = "") -> str:
             "'False alarm' = sent to a human although the CNN's own answer was right; 'good flag' = sent to a human and the "
             "CNN's answer was wrong. Latency is the slowest detector the scheme waits for (they run in parallel).", "",
             DECISION_RULE]
+    return "\n".join(out)
+
+
+CONFUSION = {"bearing_wear", "corrosion"}
+
+
+def per_photo(images: list, scheme_key: str) -> str:
+    """Every photo for one scheme: truth, each detector's answer, the final answer, and whether a human must look.
+    Wrong automatic answers are marked, bearing_wear <-> corrosion confusions separately."""
+    rows, wrong, confusion = [], 0, 0
+    for im in images:
+        labels = {d: _label(im["answers"].get(d)) for d in DETECTORS}
+        r = decide(scheme_key, labels)
+        def show(d):
+            a = im["answers"].get(d)
+            return (f"{labels[d]} ({a['confidence']:.2f})" if labels[d] and a.get("confidence") is not None
+                    else labels[d] or f"-- ({(a or {}).get('error') or 'no answer'})")
+        if r["status"] == "review":
+            final, verdict = "HUMAN REVIEW", f"review: {r['reason']}"
+        else:
+            final = r["label"]
+            if final == im["truth"]:
+                verdict = "ok" + (" (CNN dissent noted)" if r.get("dissent") else "")
+            else:
+                wrong += 1
+                kind = ("bearing_wear/corrosion CONFUSION" if {final, im["truth"]} == CONFUSION else "other error")
+                confusion += kind.startswith("bearing")
+                verdict = f"WRONG: {kind}"
+        rows.append(f"| {im['file']} | {im['truth']} | {show('cnn')} | {show('flash')} | {show('gemma')} | {final} | {verdict} |")
+    head = (f"### Per photo, scheme {scheme_key} ({len(images)} photos)\n\n"
+            "| Photo | Truth | CNN | Flash-Next | Gemma | Final answer | Verdict |\n|---|---|---|---|---|---|---|\n")
+    return head + "\n".join(rows) + (f"\n\nWrong automatic answers: {wrong} (of which bearing_wear/corrosion confusions: "
+                                    f"{confusion}).")
+
+
+def latency_table(old: list, new: list) -> str:
+    """Per vision model: average and slowest call before and after (e.g. before / after the 1024 px resize)."""
+    def stats(images, det):
+        calls = [im["answers"][det] for im in images if im["answers"].get(det)]
+        lat = [a["latency"] for a in calls if a.get("latency") is not None]
+        ok = [a["latency"] for a in calls if a.get("latency") is not None and not a.get("error")]
+        errs = Counter(a["error"] for a in calls if a.get("error"))
+        return (f"{sum(lat) / len(lat):.1f}s / {max(lat):.1f}s" if lat else "-",
+                f"{sum(ok) / len(ok):.1f}s" if ok else "-",
+                ", ".join(f"{k} x{v}" for k, v in errs.items()) or "none")
+    out = ["| Vision model | Before: avg / slowest | After: avg / slowest | Avg of successful calls before -> after | Errors before | Errors after |",
+           "|---|---|---|---|---|---|"]
+    for det, name in (("flash", "Qwen3.8-Flash-Next"), ("gemma", "Gemma-4-31B-IT")):
+        b, a = stats(old, det), stats(new, det)
+        out.append(f"| {name} | {b[0]} | {a[0]} | {b[1]} -> {a[1]} | {b[2]} | {a[2]} |")
     return "\n".join(out)
 
 
@@ -334,6 +392,8 @@ def main(argv=None) -> int:
     ap.add_argument("--flash-model", default=FLASH_MODEL)
     ap.add_argument("--gemma-model", default=GEMMA_MODEL)
     ap.add_argument("--skip-check", action="store_true", help="skip the check against the published synthetic numbers")
+    ap.add_argument("--per-photo", metavar="SCHEME", help="also list every photo for one scheme (e.g. V)")
+    ap.add_argument("--baseline", metavar="ANSWERS.json", help="an earlier saved answers file: print latency before/after")
     ap.add_argument("--md", help="also write the report to this file")
     args = ap.parse_args(argv)
     answers = Path(args.answers)
@@ -359,6 +419,10 @@ def main(argv=None) -> int:
     else:
         ap.error("choose one of --from-round1, --photos DIR, --replay-only")
     report = render(images)
+    if args.per_photo:
+        report += "\n\n" + per_photo(images, args.per_photo)
+    if args.baseline:
+        report += "\n\n### Latency of the vision models, before and after\n\n" + latency_table(load_answers(Path(args.baseline)), images)
     print(report)
     if args.md:
         Path(args.md).write_text(report)
