@@ -1,33 +1,49 @@
-# docker compose up --build        (needs backend/.env: copy backend/.env.example and fill it in)
-# Frontend: http://localhost:3000   Backend API docs: http://localhost:8000/docs
+# One command, no keys:   docker compose up --build
+#   Frontend  http://localhost:3000   (login: admin / factory123, a demo-only login)
+#   Backend   http://localhost:8000/docs   (health: http://localhost:8000/health)
+# Everything runs in MOCK MODE by default: in-memory database, mock Evolus, and an offline recommendation writer (no LLM key).
+# REAL MODE is an opt-in: copy backend/.env.example to backend/.env, uncomment what you need, run `docker compose up --build` again.
+# Ports busy?  FRONTEND_PORT=3010 BACKEND_PORT=8010 docker compose up --build
+name: factory-agent
+
 services:
   backend:
     build:
-      context: .
+      context: .                      # the backend imports vision/, knowledge/ and data/raw (the manuals)
       dockerfile: backend/Dockerfile
-    env_file: backend/.env          # secrets stay in this file, never in the image
-    ports: ["8000:8000"]
+    env_file:
+      - docker/defaults.env           # mock-mode defaults (committed, no secrets)
+      - path: backend/.env            # OPTIONAL: your own keys; overrides the defaults above; never copied into the image
+        required: false
+    ports: ["${BACKEND_PORT:-8000}:8000"]
     volumes:
       - upload_cache:/app/backend/.upload_cache
-      - hf_cache:/root/.cache/huggingface   # embedding model, downloaded once
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/health')"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://127.0.0.1:8000/health', timeout=4)"]
+      interval: 10s
+      timeout: 6s
+      retries: 6
+      start_period: 40s
+    restart: unless-stopped
 
   frontend:
     build:
       context: frontend
-      args:
+      args:                           # baked in at build time (Next.js rewrites /api/backend/* to the backend service)
         BACKEND_URL: http://backend:8000
-        NEXT_PUBLIC_USE_MOCK: "false"
+        NEXT_PUBLIC_USE_MOCK: "false"  # "false" = talk to the backend; the app has no keys to hide in the browser
         NEXT_PUBLIC_EVOLUS_URL: ${NEXT_PUBLIC_EVOLUS_URL:-}
-    ports: ["3000:3000"]
+    ports: ["${FRONTEND_PORT:-3000}:3000"]
     depends_on:
       backend:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/login"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 15s
+    restart: unless-stopped
 
 volumes:
   upload_cache:
-  hf_cache:

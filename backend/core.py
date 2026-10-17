@@ -102,10 +102,19 @@ def _providers() -> list:
     return out
 
 
+def offline_writer_active() -> bool:
+    """True when NO LLM provider is configured and OFFLINE_WRITER is not "off": the agent then writes the recommendation
+    from the manual's own "Action Required" step (a labelled template, not an AI answer), so the app works with no keys."""
+    off = os.getenv("OFFLINE_WRITER", "auto").strip().lower() in ("off", "false", "0", "no")
+    return not off and not _providers()
+
+
 def llm_status() -> dict:
     """Provider/model for /health: the one that last answered, else the first one configured."""
     if LAST_LLM.get("provider"):
         return {"provider": LAST_LLM["provider"], "model": LAST_LLM["model"], "answered": True}
+    if offline_writer_active():
+        return {"provider": "offline", "model": "template from the manuals (no LLM key configured)", "answered": False}
     first = (_providers() or [{}])[0]
     return {"provider": first.get("name"), "model": first.get("model"), "answered": False}
 
@@ -146,13 +155,19 @@ def _use_schema(p: dict) -> bool:
     return _is_mimo(p["model"]) and os.getenv("TOKENFACTORY_JSON_SCHEMA", "").strip().lower() in ("1", "true", "yes")
 
 
+def _effort() -> str:
+    return os.getenv("TOKENFACTORY_REASONING_EFFORT", "low").strip() or "low"
+
+
 def _payload(p: dict, system: str, prompt: str, json_output: bool, max_tokens: int,
-             schema: bool = False) -> dict:
+             schema: bool = False, effort: str = None) -> dict:
     payload = {"model": p["model"], "temperature": 0.2,
                # exactly one system message, at index 0, text-only content
                "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}]}
     if p["name"] == "tokenfactory":
-        payload["reasoning_effort"] = os.getenv("TOKENFACTORY_REASONING_EFFORT", "low").strip() or "low"
+        effort = _effort() if effort is None else effort
+        if effort != "omit":
+            payload["reasoning_effort"] = effort
         payload["max_tokens"] = max_tokens
         if json_output:
             payload["response_format"] = (
@@ -172,10 +187,17 @@ def _ask(p: dict, system: str, prompt: str, json_output: bool) -> tuple:
     max_tokens = TF_MAX_TOKENS
     schema = p["name"] == "tokenfactory" and json_output and _use_schema(p)
     cut_off_retried = False
-    for _ in range(3):  # extra passes: answer cut off by max_tokens, or the server refused the json_schema
+    efforts = [e for e in (p.get("effort") or _effort(), "low", "omit") if e]  # some models reject "none" (MiniCPM-V-4.7-1B)
+    efforts = list(dict.fromkeys(efforts))
+    for _ in range(6):  # extra passes: answer cut off by max_tokens, or the server refused the json_schema
         try:
-            r = _post_with_retries(p, _payload(p, system, prompt, json_output, max_tokens, schema))
+            r = _post_with_retries(p, _payload(p, system, prompt, json_output, max_tokens, schema, efforts[0]))
         except httpx.HTTPStatusError as exc:
+            detail = _error_detail(exc.response).lower()
+            if (p["name"] == "tokenfactory" and exc.response.status_code in (400, 422) and "reasoning" in detail
+                    and len(efforts) > 1):
+                efforts.pop(0)  # this model does not accept that reasoning_effort value: try the next one
+                continue
             if schema and exc.response.status_code == 400 and "schema" in _error_detail(exc.response).lower():
                 schema = False  # this model/server does not do json_schema: use json_object from now on
                 continue
@@ -232,6 +254,41 @@ def call_llm(prompt: str, system: str = "You are a factory maintenance assistant
         LAST_LLM.update(provider=p["name"], model=model)
         return text
     raise LLMUnavailableError("All LLM providers failed (" + ", ".join(errors) + ")")
+
+
+def text_fallback_model() -> str:
+    return os.getenv("TEXT_FALLBACK_MODEL", "DeepSeek-V4-Flash").strip() or "DeepSeek-V4-Flash"
+
+
+def text_fallback_effort() -> str:
+    return os.getenv("TEXT_FALLBACK_EFFORT", "none").strip() or "none"
+
+
+def primary_text_model() -> str:
+    return os.getenv("TOKENFACTORY_MODEL", "MiMo-V2.6-Flash").strip() or "MiMo-V2.6-Flash"
+
+
+def call_llm_backup(prompt: str, system: str = "You are a factory maintenance assistant.",
+                    json_output: bool = True) -> str:
+    """ONE attempt with the backup text model (TEXT_FALLBACK_MODEL, default DeepSeek-V4-Flash, reasoning effort
+    TEXT_FALLBACK_EFFORT, default none) on Token Factory, with the same base URL and key as the primary. The usual
+    429/502/503 transport retries still apply, but there is no further fallback: failure raises LLMUnavailableError."""
+    tf = next((p for p in _providers() if p["name"] == "tokenfactory"), None)
+    if tf is None:
+        raise LLMUnavailableError("Backup text model: Token Factory is not configured")
+    p = {**tf, "model": text_fallback_model(), "effort": text_fallback_effort()}
+    try:
+        text, model = _ask(p, system, prompt, json_output)
+    except LLMConfigError as exc:
+        raise LLMUnavailableError(f"Backup text model: {exc}") from None
+    except httpx.HTTPStatusError as exc:
+        detail = _error_detail(exc.response)
+        log.warning("backup text model failed: HTTP %s %s", exc.response.status_code, detail)
+        raise LLMUnavailableError(f"Backup text model: HTTP {exc.response.status_code}") from None
+    except Exception as exc:  # never include the request or the key
+        raise LLMUnavailableError(f"Backup text model: {type(exc).__name__}") from None
+    LAST_LLM.update(provider="tokenfactory", model=model)
+    return text
 
 
 # ---------------- Test defects (agent.py's `python agent.py` demo; no real detector needed) ----------------

@@ -1,11 +1,16 @@
+# Keeps the build context small and keeps every secret and local data folder out of the images.
 .git
 **/.env
 **/.env.*
 !**/.env.example
 **/.venv
+**/venv
 **/__pycache__
 **/.pytest_cache
 **/.upload_cache
-frontend/node_modules
+**/node_modules
 frontend/.next
 docs
+# only the manuals are needed inside the backend image; photos, answers and experiments stay on your machine
+data/*
+!data/raw

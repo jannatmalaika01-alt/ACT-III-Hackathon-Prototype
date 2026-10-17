@@ -1,5 +1,5 @@
 import { AlertTriangle, Check, Loader2, X } from "lucide-react";
-import type { Case } from "@/lib/types";
+import { evolusInProgress, type Case } from "@/lib/types";
 
 type S = "done" | "current" | "todo" | "warn" | "fail";
 
@@ -28,7 +28,7 @@ export default function Pipeline({ c }: { c: Case }) {
     ["AI diagnosis", diag ? "done" : "current"],
     ["Manual source", !diag ? "todo" : cited ? "done" : "warn"],
     ["Human decision", c.status === "rejected" ? "fail" : decided ? "done" : diag ? "current" : "todo"],
-    ["Evolus task", c.status === "task_created" ? "done" : c.status === "task_failed" ? "fail" : c.status === "approved" ? "current" : "todo"],
+    ["Evolus task", c.status === "task_created" ? "done" : evolusInProgress(c) ? "current" : c.status === "task_failed" ? "fail" : "todo"],
   ];
   return (
     <div className="card overflow-x-auto p-4">

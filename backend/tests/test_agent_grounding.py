@@ -31,6 +31,11 @@ def agent_mod(monkeypatch):
         return r if isinstance(r, str) else json.dumps(r)
 
     monkeypatch.setattr(agent, "call_llm", fake_llm)
+
+    def no_backup(prompt, system=""):  # the backup text model is never reached for real in these tests
+        raise RuntimeError("backup unavailable")
+
+    monkeypatch.setattr(agent, "call_llm_backup", no_backup)
     yield agent
     for name in ("core", "agent"):
         sys.modules.pop(name, None)

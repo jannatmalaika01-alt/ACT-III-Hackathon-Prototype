@@ -21,7 +21,7 @@ sys.path.insert(0, str(HERE.parents[1]))
 REPO = HERE.parents[2]
 
 DEFAULT_MODELS = ["MiMo-V2.6-Flash", "Qwen3.8-27B", "DeepSeek-V4-Flash"]
-MAX_PER_MIN = 20
+MAX_PER_MIN = 15  # the server allows 20/min per key and the quota is shared
 DRY_RUN_CASES = 3
 
 # the manual a correct citation must come from, per defect type
@@ -68,9 +68,16 @@ class Pacer:
         self._sleep(seconds)
 
 
+STOP_AFTER = 3  # consecutive timeouts / rate limits: stop the model, do not retry in a loop
+
+
+def _transient(error):
+    return bool(error) and any(k in error for k in ("ReadTimeout", "Timeout", "HTTP 429", "rate"))
+
+
 def run_model(model, cases, agent, core, pacer):
     os.environ["TOKENFACTORY_MODEL"] = model
-    rows = []
+    rows, consecutive = [], 0
     for case in cases:
         before_waits = pacer.waits
         start = time.time()
@@ -92,6 +99,11 @@ def run_model(model, cases, agent, core, pacer):
                        manual_ok=result["source_manual"] == EXPECTED_MANUAL.get(case["defect_type"]),
                        answered_by=llm.get("model"))
         rows.append(row)
+        consecutive = consecutive + 1 if _transient(error) else 0
+        if consecutive >= STOP_AFTER:
+            print(f"  STOPPED {model}: {STOP_AFTER} consecutive timeouts / rate limits ({error})", flush=True)
+            row["stopped"] = True
+            break
         flag = "ok " if not error and row["json_valid"] else "BAD"
         print(f"  [{flag}] {row['case'][:44]:44} {latency:5.1f}s", flush=True)
     return rows
@@ -99,12 +111,13 @@ def run_model(model, cases, agent, core, pacer):
 
 def summarize(model, rows):
     n = len(rows)
+    stopped = any(r.get("stopped") for r in rows)
     pct = lambda k: 100.0 * sum(1 for r in rows if r[k]) / n  # noqa: E731
     return {"model": model, "n": n, "json": pct("json_valid"), "quote": pct("quote_verified"),
             "manual": pct("manual_ok"), "latency": sum(r["latency"] for r in rows) / n, "max_latency": max(r["latency"] for r in rows),
             "rate_limited": sum(r["http_retries"] for r in rows),
             "error_texts": sorted({r["error"] for r in rows if r["error"]}),
-            "retries": sum(r["http_retries"] + r["json_retried"] for r in rows),
+            "retries": sum(r["http_retries"] + r["json_retried"] for r in rows), "stopped": stopped,
             "errors": sum(1 for r in rows if r["error"])}
 
 
@@ -113,7 +126,8 @@ def table(summaries):
             "Retries (HTTP + JSON) | Errors |\n|---|---|---|---|---|---|---|---|\n")
     return head + "\n".join(
         f"| {s['model']} | {s['n']} | {s['json']:.0f}% | {s['quote']:.0f}% | {s['manual']:.0f}% | "
-        f"{s['latency']:.1f}s / {s['max_latency']:.1f}s | {s['retries']} | {s['errors']} |" for s in summaries)
+        f"{s['latency']:.1f}s / {s['max_latency']:.1f}s | {s['retries']} | {s['errors']}"
+        f"{' (STOPPED early)' if s.get('stopped') else ''} |" for s in summaries)
 
 
 def pick_winner(summaries):

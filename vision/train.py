@@ -54,32 +54,19 @@ def _augment(x: torch.Tensor) -> torch.Tensor:
     return x
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--per-class", type=int, default=1200)
-    ap.add_argument("--epochs", type=int, default=20)
-    ap.add_argument("--degrade", type=float, default=0.65, help="share of training images that are blurred/darkened/rotated/noisy")
-    ap.add_argument("--lr", type=float, default=2e-3)
-    args = ap.parse_args()
-
-    random.seed(0), np.random.seed(0), torch.manual_seed(0)
-    xs, ys = _synthetic(args.per_class, TRAIN_SEED, args.degrade)
-    rx, ry = _real_images()
-    if rx:
-        print(f"adding {len(rx)} real photos from data/train/ (x3 weight)")
-        xs += rx * 3
-        ys += ry * 3
-    vx, vy = _synthetic(150, VAL_SEED, 0.5)  # validation also contains degraded images
+def fit(xs, ys, vx, vy, epochs: int, lr: float):
+    """Train a DefectCNN on (xs, ys) and report accuracy on (vx, vy) after every epoch. Returns (model on CPU, last
+    validation accuracy). This is the loop `python -m vision.train` has always used."""
     X, Y = torch.tensor(np.stack(xs)), torch.tensor(ys)
     VX, VY = torch.tensor(np.stack(vx)), torch.tensor(vy)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"  # ROCm builds also report "cuda"
     model = DefectCNN(len(CLASSES)).to(device)
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=args.lr, total_steps=args.epochs * ((len(X) + 63) // 64))
+    opt = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=1e-4)
+    sched = torch.optim.lr_scheduler.OneCycleLR(opt, max_lr=lr, total_steps=epochs * ((len(X) + 63) // 64))
     loss_fn = nn.CrossEntropyLoss(label_smoothing=0.05)
 
-    for epoch in range(args.epochs):
+    for epoch in range(epochs):
         model.train()
         perm = torch.randperm(len(X))
         total = 0.0
@@ -96,12 +83,33 @@ def main():
         model.eval()
         with torch.no_grad():
             acc = (model(VX.to(device)).argmax(1).cpu() == VY).float().mean().item()
-        print(f"epoch {epoch + 1:2d}/{args.epochs}  loss {total / len(X):.4f}  val_acc {acc:.3f}")
+        print(f"epoch {epoch + 1:2d}/{epochs}  loss {total / len(X):.4f}  val_acc {acc:.3f}")
+    return model.cpu(), acc
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--per-class", type=int, default=1200)
+    ap.add_argument("--epochs", type=int, default=20)
+    ap.add_argument("--degrade", type=float, default=0.65, help="share of training images that are blurred/darkened/rotated/noisy")
+    ap.add_argument("--lr", type=float, default=2e-3)
+    args = ap.parse_args()
+
+    random.seed(0), np.random.seed(0), torch.manual_seed(0)
+    xs, ys = _synthetic(args.per_class, TRAIN_SEED, args.degrade)
+    rx, ry = _real_images()
+    if rx:
+        print(f"adding {len(rx)} real photos from data/train/ (x3 weight)")
+        xs += rx * 3
+        ys += ry * 3
+    vx, vy = _synthetic(150, VAL_SEED, 0.5)  # validation also contains degraded images
+    model, acc = fit(xs, ys, vx, vy, args.epochs, args.lr)
 
     os.makedirs(os.path.dirname(WEIGHTS), exist_ok=True)
-    torch.save(model.cpu().state_dict(), WEIGHTS)
+    torch.save(model.state_dict(), WEIGHTS)
     with open(META, "w") as f:
-        json.dump({"classes": CLASSES, "val_accuracy": round(acc, 4), "train_images": len(X), "degraded_share": args.degrade, "epochs": args.epochs, "real_photos": len(rx),
+        json.dump({"classes": CLASSES, "val_accuracy": round(acc, 4), "train_images": len(xs), "degraded_share": args.degrade, "epochs": args.epochs,
+                   "real_photos": len(rx),
                    "trained_on": "synthetic + real photos" if rx else "synthetic only"}, f, indent=2)
     print(f"saved {WEIGHTS}")
 

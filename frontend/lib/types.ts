@@ -18,6 +18,77 @@ export interface CaseEvent {
   created_at: string;
 }
 
+// What one detector said. `error` is set (and `label` null) when it failed or timed out.
+export interface DetectorAnswer {
+  label: string | null;
+  confidence: number | null;
+  name?: string;
+  error?: string | null;
+}
+
+// The dual detector's result, stored by the backend in diagnosis_raw.dual_detector (backend/app/dual_detector.py).
+export interface DualDetector {
+  mode: string;                       // vision_primary (default) | pair | unanimous | vote | cnn_anchored
+  agreement: "agree" | "disagree" | "single_detector";
+  needs_human_review: boolean;
+  decision: string;                   // why: "vision models agree", "3-way split", ...
+  suggestion?: string;                // "2 of 3 say corrosion"
+  note?: string;
+  cnn: DetectorAnswer;
+  vision_model?: DetectorAnswer;
+  vision_model_2?: DetectorAnswer;
+  answer?: { label: string; confidence: number | null; from: string };
+  warnings?: string[];
+  cnn_dissent?: { label: string; confidence: number | null; trust: string; note?: string } | null;
+  cnn_tie?: { label: string; confidence: number | null; threshold: number; used: boolean } | null;
+}
+
+// One citation of the Evolus agent after the backend checked its quote against our manuals (backend/app/citations.py).
+export interface VerifiedCitation {
+  document: string | null;            // the real file name of the manual (.pdf), not the agent's .txt
+  page: number | null;
+  quote: string | null;               // for "corrected" this is the manual's exact wording
+  status: "verified" | "corrected" | "unverified";
+  similarity?: number;
+  agent_quote?: string;               // what the agent wrote, kept when it was corrected
+  claimed?: { document: string | null; page: number | null };   // set when the text was found somewhere other than where the agent said
+  note?: string;
+  raw?: string;
+}
+
+// The Evolus agent's reply, parsed by the backend (backend/app/evolus.py parse_agent_reply), in diagnosis_raw.evolus.
+export interface EvolusResult {
+  execution_id: string;
+  status?: string;
+  raw_text: string;
+  parsed: {
+    defect: string | null;
+    severity: string | null;
+    probable_cause: string | null;
+    safety_precautions: string[];
+    recommended_steps: string[];
+    citation: string[];
+    confidence: number | null;
+    confidence_text?: string | null;
+    needs_human_review: boolean;
+    summary: string | null;
+  };
+  notes: string[];
+  citations?: VerifiedCitation[];     // the agent's citations after the check; absent on results stored before the check existed
+  citation_check?: { verified: number; corrected: number; unverified: number };
+  agent_needs_human_review?: boolean; // what the agent itself said; parsed.needs_human_review is also true when a quote is unverified
+  duration_seconds?: number;
+  evolus_seconds?: number | null;
+  resumed?: boolean;
+}
+
+export interface DiagnosisRaw {
+  needs_manual_verification?: boolean;
+  defect_report?: { defect_type?: string; location?: string; confidence?: number };
+  dual_detector?: DualDetector;
+  evolus?: Partial<EvolusResult> & { state?: string };
+}
+
 // INTEGRATION(KARIM, SUVE): mirrors one row of the "cases" table (backend/app/db.py).
 // The AI fields stay null until the AI pipeline posts a diagnosis (POST /cases/{id}/diagnosis).
 export interface Case {
@@ -38,8 +109,11 @@ export interface Case {
   evolus_task_id: string | null;
   task_error: string | null;
   task_attempts: number;
+  // Only on GET /cases/{id}: is an Evolus run in progress for this case right now? (EVOLUS_MODE=rest runs it in the background)
+  evolus?: { running: boolean; started_at: string | null; execution_id: string | null };
   created_at: string;
   updated_at: string;
+  diagnosis_raw?: DiagnosisRaw | null;
   // Only present on GET /cases/{id}
   approvals?: Approval[];
   events?: CaseEvent[];
@@ -52,6 +126,9 @@ export const hasDiagnosis = (c: Case) => !!c.defect;
 // Same rule as REQUIRED_FOR_APPROVAL in backend/app/service.py
 export const missingForApproval = (c: Case) =>
   (["defect", "recommended_action", "source_manual", "source_page"] as const).filter((k) => !c[k]);
+
+// True while the Evolus agent is preparing the task: the backend says so, and a case that is "approved" but has no task yet is waiting too.
+export const evolusInProgress = (c: Case) => !!c.evolus?.running || c.status === "approved";
 
 export const shortId = (id: string) => id.slice(0, 8);
 

@@ -24,6 +24,7 @@ export default function Shell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     const u = getUser();
     if (!u) router.replace("/login");
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- the stored user lives in localStorage, which only exists in the browser after mount
     else setUser(u);
   }, [router]);
 

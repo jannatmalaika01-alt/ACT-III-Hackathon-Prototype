@@ -2,15 +2,19 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useState } from "react";
-import { ArrowLeft, BookOpen, Check, Code2, Copy, ExternalLink, FileText, History, Loader2, RotateCcw, X } from "lucide-react";
+import { AlertTriangle, ArrowLeft, BookOpen, Check, Code2, Copy, ExternalLink, FileText, History, Loader2, RotateCcw, X } from "lucide-react";
 import Shell from "@/components/Shell";
 import Pipeline from "@/components/Pipeline";
+import EvolusProgress from "@/components/EvolusProgress";
+import DetectorVotes from "@/components/DetectorVotes";
+import EvolusResultCard from "@/components/EvolusResultCard";
 import { useToast } from "@/components/Toast";
 import { ConfidenceRing, SeverityBadge, StatusBadge } from "@/components/Badges";
 import { approveCase, fileUrl, getCase, rejectCase, retryTask } from "@/lib/api";
 import { getUser } from "@/lib/auth";
+import { answerSource, candidatesOf, dualOf, isUnverified, pct, pretty } from "@/lib/detectors";
 import { EVOLUS_URL, IS_MOCK } from "@/lib/config";
-import { hasDiagnosis, inputKind, LOW_CONFIDENCE, missingForApproval, shortId, type Case } from "@/lib/types";
+import { evolusInProgress, hasDiagnosis, inputKind, LOW_CONFIDENCE, missingForApproval, shortId, type Case, type EvolusResult } from "@/lib/types";
 
 export default function CasePage() {
   const { id } = useParams<{ id: string }>();
@@ -35,6 +39,15 @@ export default function CasePage() {
     return () => clearInterval(t);
   }, [awaiting, load]);
 
+  // The Evolus agent can take minutes. The server runs it in the background, so approving returns at once; we just keep
+  // checking until the task exists or the run ends (the rest of the page stays usable meanwhile).
+  const evolusBusy = c ? evolusInProgress(c) : false;
+  useEffect(() => {
+    if (!evolusBusy) return;
+    const t = setInterval(load, 3000);
+    return () => clearInterval(t);
+  }, [evolusBusy, load]);
+
   async function act(kind: "approve" | "reject" | "retry") {
     setBusy(true);
     const by = getUser() ?? "unknown";
@@ -44,7 +57,10 @@ export default function CasePage() {
         toast("info", "Case rejected");
       } else {
         const r = kind === "approve" ? await approveCase(id, by) : await retryTask(id);
-        if (r.status === "task_failed") toast("error", "Approval saved, but the Evolus task failed. You can retry.");
+        if (r.status === "approved" || r.evolus?.running) toast("info", kind === "retry"
+          ? "Retrying. If the earlier Evolus run is still going, we pick it up where it left off."
+          : "Approved. The Evolus agent is preparing the maintenance task; this can take a few minutes.");
+        else if (r.status === "task_failed") toast("error", "Approval saved, but the Evolus task failed. You can retry.");
         else toast("success", `Evolus task created: ${r.evolus_task_id}`);
       }
       setRejecting(false);
@@ -68,10 +84,18 @@ export default function CasePage() {
 
   const diag = hasDiagnosis(c);
   const missing = diag ? missingForApproval(c) : [];
-  const lowConf = diag && (c.confidence ?? 1) < LOW_CONFIDENCE;
+  const dual = dualOf(c);
+  const unverified = isUnverified(c);
+  const candidates = unverified ? candidatesOf(c) : [];
+  const evolusAnswer = c.diagnosis_raw?.evolus && "parsed" in c.diagnosis_raw.evolus ? (c.diagnosis_raw.evolus as EvolusResult) : null;
+  // With the vote card the "low confidence" banner would say the wrong thing about a case that is unverified because the detectors disagree
+  const lowConf = diag && !dual && (c.confidence ?? 1) < LOW_CONFIDENCE;
   const canDecide = c.status === "pending" && diag;
   const isImage = c.content_type.startsWith("image/");
   const rejection = c.approvals?.find((a) => a.decision === "rejected");
+  // when the Evolus step began: from the server, else from the "approved" event (so a reload still shows the right time)
+  const evolusSince = c.evolus?.started_at ?? c.events?.find((e) => e.to_status === "approved")?.created_at ?? null;
+  const timedOut = (c.task_error ?? "").includes("did not finish");
   const analysisError = [...(c.events ?? [])].reverse().find((e) => e.note?.startsWith("analysis failed"))?.note;
 
   return (
@@ -85,7 +109,9 @@ export default function CasePage() {
           <p className="text-xs text-slate-500">{inputKind(c.content_type)} · {c.file_name} · uploaded by {c.uploaded_by}</p>
         </div>
         <StatusBadge status={c.status} />
-        <SeverityBadge severity={c.severity} />
+        {unverified
+          ? <span className="inline-flex items-center rounded-full border border-amber-400/40 bg-amber-400/10 px-2.5 py-0.5 text-xs font-semibold text-amber-300">Unverified</span>
+          : <SeverityBadge severity={c.severity} />}
         <button onClick={() => setShowJson((v) => !v)}
           className="ml-auto flex items-center gap-1.5 rounded-md border border-white/10 px-3 py-1.5 text-xs text-slate-300 hover:bg-white/5">
           <Code2 className="h-3.5 w-3.5" /> Raw JSON
@@ -99,6 +125,13 @@ export default function CasePage() {
           ⚠ Review carefully:
           {lowConf && " detection confidence is low (may be a false positive)."}
           {missing.length > 0 && ` the backend will not allow approval because these fields are missing: ${missing.join(", ")}.`}
+        </div>
+      )}
+
+      {(evolusAnswer?.citation_check?.unverified ?? 0) > 0 && (
+        <div className="mb-4 rounded-lg border border-red-400/40 bg-red-400/10 p-3 text-sm text-red-200" data-testid="evolus-citation-banner">
+          ⚠ The Evolus answer cites {evolusAnswer!.citation_check!.unverified === 1 ? "a quote" : `${evolusAnswer!.citation_check!.unverified} quotes`} that
+          could not be found in our manuals, so it needs a human check before anyone acts on it.
         </div>
       )}
 
@@ -134,17 +167,49 @@ export default function CasePage() {
                   <FileText className="h-4 w-4" /> Open uploaded file
                 </a>
               )}
-              <div className="flex items-center gap-5">
-                <ConfidenceRing value={c.confidence} />
-                <div className="text-xl font-semibold capitalize">{c.defect?.replace("_", " ")}</div>
-              </div>
+              {unverified ? (
+                <div className="rounded-lg border border-amber-400/30 bg-amber-400/10 p-4" data-testid="unverified-headline">
+                  <div className="flex items-center gap-2 text-xl font-semibold text-amber-200">
+                    <AlertTriangle className="h-5 w-5 shrink-0" /> Unverified: needs human review
+                  </div>
+                  <p className="mt-1 text-sm text-amber-100/80">
+                    No single defect is named here. A person must look at the file and decide which of these is right:
+                  </p>
+                  <ul className="mt-3 space-y-2">
+                    {candidates.map((cand) => (
+                      <li key={cand.label} className="rounded-md bg-black/20 px-3 py-2 text-sm" data-testid="candidate">
+                        <span className="font-semibold capitalize text-slate-100">{pretty(cand.label)}</span>
+                        <span className="text-slate-400"> proposed by </span>
+                        {cand.proposers.map((pr, i) => (
+                          <span key={pr.name}>{i > 0 && ", "}<span className="text-slate-200">{pr.name}</span>
+                            <span className="text-xs text-slate-500"> ({pct(pr.confidence)}{pr.advisory ? ", advisory" : ""})</span></span>
+                        ))}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              ) : (
+                <div className="flex items-center gap-5">
+                  <ConfidenceRing value={c.confidence} />
+                  <div>
+                    <div className="text-xl font-semibold capitalize">{pretty(c.defect?.split(" at ")[0])}</div>
+                    {c.defect?.includes(" at ") && <div className="text-xs text-slate-400">at {c.defect.split(" at ").slice(1).join(" at ")}</div>}
+                    {dual && answerSource(dual) && (
+                      <div className="mt-1 text-xs text-slate-500">confidence of {answerSource(dual)}, the model that gave this answer</div>
+                    )}
+                  </div>
+                </div>
+              )}
               <p className="mt-4 text-sm leading-relaxed text-slate-300">{c.explanation}</p>
             </section>
+
+            {dual && <DetectorVotes d={dual} />}
 
             <section className="card animate-fade-up p-5">
               <h2 className="mb-4 flex items-center gap-2 text-sm font-semibold text-slate-300">
                 <BookOpen className="h-4 w-4" /> Source from manuals / SOPs
               </h2>
+              {unverified && <p className="mb-2 text-xs text-amber-300/80">This page belongs to the leading candidate ({pretty(c.diagnosis_raw?.defect_report?.defect_type ?? c.defect?.split(" at ")[0])}) only. Confirm the defect first.</p>}
               {/* INTEGRATION(TITUS): the backend stores one citation (manual and page). To show the exact
                   quote, add a source_excerpt field to DiagnosisIn and display it here. */}
               {c.source_manual && c.source_page ? (
@@ -155,6 +220,10 @@ export default function CasePage() {
                 <p className="text-sm text-red-300">No citation. A human must verify this recommendation.</p>
               )}
             </section>
+
+            {c.status === "task_created" && evolusAnswer && (
+              <EvolusResultCard taskId={c.evolus_task_id} result={evolusAnswer} evolusUrl={EVOLUS_URL || undefined} />
+            )}
           </div>
 
           <section className="card animate-fade-up h-fit space-y-4 p-5 lg:col-span-2 lg:sticky lg:top-6">
@@ -200,13 +269,19 @@ export default function CasePage() {
               </div>
             )}
 
-            {c.status === "task_failed" && (
+            {evolusBusy && <EvolusProgress since={evolusSince} />}
+
+            {c.status === "task_failed" && !evolusBusy && (
               <div className="space-y-3 rounded-lg border border-orange-400/30 bg-orange-400/10 p-3 text-sm text-orange-200">
-                <p>Your approval is saved, but the Evolus task failed (attempts: {c.task_attempts}).</p>
-                <p className="text-xs text-orange-300/80">{c.task_error}</p>
+                <p>
+                  {timedOut
+                    ? "Evolus is taking longer than expected. Your approval is saved and the run may still finish; Retry picks it up where it left off."
+                    : "Your approval is saved, but the Evolus task could not be created this time. You can try again."}
+                </p>
+                <p className="text-xs text-orange-300/70">Attempts: {c.task_attempts}. {c.task_error}</p>
                 <button disabled={busy} onClick={() => act("retry")}
                   className="flex w-full items-center justify-center gap-2 rounded-lg bg-orange-500 py-2 text-sm font-semibold text-slate-950 hover:bg-orange-400 disabled:opacity-50">
-                  <RotateCcw className="h-4 w-4" /> {busy ? "Retrying..." : "Retry task"}
+                  <RotateCcw className="h-4 w-4" /> {busy ? "Retrying..." : "Retry"}
                 </button>
               </div>
             )}

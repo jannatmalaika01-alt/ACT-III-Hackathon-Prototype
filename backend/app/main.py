@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from .config import Settings, get_settings
+from . import dual_detector, feedback as feedback_store
 from .db import InMemoryRepo, SupabaseRepo
 from .evolus import build_evolus_client
 from .models import ApproveIn, CaseStatus, DiagnosisIn, RejectIn, WebhookIn
@@ -104,6 +105,36 @@ def _detect_report(case_id: str, location: Optional[str]) -> Optional[dict]:
     }
 
 
+IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp")
+
+
+def _detect_dual(case_id: str, location: Optional[str]):
+    """DUAL_DETECTOR=on and the upload is an image: run the CNN and the vision model in parallel.
+    Returns (defect_report, dual_result), or None to use the normal single-CNN path.
+    The report carries the detector that answered (the CNN when both did); confidences are never mixed."""
+    path = _find_cached(case_id)
+    if path is None or path.suffix.lower() not in IMAGE_SUFFIXES:
+        return None
+    dual = dual_detector.run_dual(str(path))
+    if dual is None:
+        return None
+    # `answer` is the decided label (or, on a review, the leading suggestion) with the confidence of the detector
+    # that gave it: confidences are never averaged
+    chosen = dual["answer"]
+    report = {
+        "defect_type": chosen["label"].replace("_", " "),
+        "location": location or DEFAULT_LOCATION,
+        "confidence": max(0.0, min(1.0, float(chosen.get("confidence") if chosen.get("confidence") is not None else 0.0))),
+        "image_ref": path.name,
+        "needs_human_review": dual["needs_human_review"],
+        "detectors": {k: dual[k] for k in ("mode", "cnn", "vision_model", "vision_model_2", "agreement", "votes",
+                                            "suggestion", "models_answered", "decision", "warnings", "cnn_tie") if k in dual},
+        "cnn_dissent": dual.get("cnn_dissent"),
+        "warnings": dual.get("warnings") or [],
+    }
+    return report, dual
+
+
 class DefectReportIn(BaseModel):
     """What the vision step (Titus) reports about a case. The agent turns it into a diagnosis."""
 
@@ -129,7 +160,7 @@ def create_app(settings: Optional[Settings] = None, repo=None, evolus=None) -> F
     settings = settings or get_settings()
     repo = repo if repo is not None else build_repo(settings)
     evolus = evolus if evolus is not None else build_evolus_client(settings)
-    service = CaseService(repo, evolus)
+    service = CaseService(repo, evolus, background=(settings.evolus_mode == "rest" and settings.evolus_background))
 
     app = FastAPI(title="AI Factory Maintenance Agent - Backend", version="0.1.0")
     app.state.settings, app.state.repo, app.state.evolus, app.state.service = settings, repo, evolus, service
@@ -148,7 +179,8 @@ def create_app(settings: Optional[Settings] = None, repo=None, evolus=None) -> F
         return JSONResponse(status_code=409, content={"detail": str(exc)})
 
     # ---- shared by /diagnose and /analyze ----
-    async def _run_agent(case_id: UUID, report: dict, feedback: Optional[str], source: Optional[str]):
+    async def _run_agent(case_id: UUID, report: dict, feedback: Optional[str], source: Optional[str],
+                         extra_raw: Optional[dict] = None):
         """Run the AI agent on a defect report and store its diagnosis on the case.
         `source` ("simulated" / "vision") is saved in diagnosis_raw.defect_source; None leaves raw untouched."""
         case = repo.get_case(str(case_id))
@@ -169,11 +201,27 @@ def create_app(settings: Optional[Settings] = None, repo=None, evolus=None) -> F
         except Exception:
             log.exception("AI diagnosis failed for case %s", case_id)  # full details stay in the server log
             raise HTTPException(502, "AI diagnosis failed.")
-        if source is not None:
+        if source is not None or extra_raw:
             raw = dict(result.get("raw") or {})
-            raw["defect_source"] = source
+            if source is not None:
+                raw["defect_source"] = source
+            raw.update(extra_raw or {})
             result = {**result, "raw": raw}
         return await run_in_threadpool(service.attach_diagnosis, str(case_id), DiagnosisIn(**result))
+
+    def _save_feedback(case_id: str, approved_by: str) -> None:
+        """A person approved this case: keep the photo + approved label for a later retrain. Never raises."""
+        try:
+            case = repo.get_case(case_id)
+            if not case or not (case.get("content_type") or "").startswith("image/"):
+                return
+            data = repo.download_file(case["file_path"])
+            if data is None:
+                cached = _find_cached(case_id)
+                data = cached.read_bytes() if cached else None
+            feedback_store.save_approved(case, data, approved_by)
+        except Exception:
+            log.exception("feedback save failed for case %s", case_id)
 
     # ---- routes ----
     @app.get("/health")
@@ -196,6 +244,11 @@ def create_app(settings: Optional[Settings] = None, repo=None, evolus=None) -> F
             "llm_provider": llm["provider"],
             "llm_answered": llm["answered"],
             "detector": "defect_cnn" if real_detector else "simulated",
+            "dual_detector": dual_detector.enabled(),
+            "vision_model": dual_detector.vision_model() if dual_detector.enabled() else None,
+            "dual_mode": dual_detector.mode() if dual_detector.enabled() else None,
+            "vision_model_2": (dual_detector.vision_model_2()
+                               if dual_detector.enabled() and dual_detector.mode() != "pair" else None),
         }
 
     @app.post("/cases", status_code=201)
@@ -266,6 +319,17 @@ def create_app(settings: Optional[Settings] = None, repo=None, evolus=None) -> F
             report = body.model_dump(exclude={"rejection_feedback"})
             return await _run_agent(case_id, report, body.rejection_feedback, "vision")
 
+        if dual_detector.enabled():
+            try:
+                found = await run_in_threadpool(_detect_dual, str(case_id), location)
+            except Exception:
+                log.exception("dual detection failed for case %s; using the single detector", case_id)
+                found = None
+            if found is not None:
+                report, dual = found
+                case = await _run_agent(case_id, report, None, "vision", {"dual_detector": dual})
+                return {**case, "dual_detector": dual}
+
         report = None
         try:
             report = await run_in_threadpool(_detect_report, str(case_id), location)
@@ -282,7 +346,9 @@ def create_app(settings: Optional[Settings] = None, repo=None, evolus=None) -> F
     def approve_case(case_id: UUID, body: ApproveIn):
         # 200 even if the Evolus task failed: the approval itself succeeded.
         # Check the returned `status` ('task_created' or 'task_failed').
-        return service.approve(str(case_id), body)
+        result = service.approve(str(case_id), body)
+        _save_feedback(str(case_id), body.decided_by)
+        return result
 
     @app.post("/cases/{case_id}/reject")
     def reject_case(case_id: UUID, body: RejectIn):
