@@ -1,6 +1,8 @@
 """Compatibility with the team backend (backend/ on GitHub main): our output must be accepted by its API,
 and our retriever must work inside its real LangGraph agent. Skipped if the backend or its packages are missing."""
+import json
 import os
+import re
 import sys
 import types
 
@@ -26,7 +28,23 @@ def backend(monkeypatch):
     """The backend's real agent.py, with its `core` module replaced: LLM is a stub, retrieval is OURS."""
     monkeypatch.syspath_prepend(BACKEND)
     core = types.ModuleType("core")
-    core.call_llm = lambda prompt, system="": '{"explanation": "Worn bearing.", "recommended_action": "Replace bearing.", "severity": "high", "source_index": 0}'
+
+    def stub_llm(prompt, system=""):
+        # The agent only accepts a recommendation whose evidence quote really is in the cited page, so the stub quotes the first line
+        # of the retrieved excerpt "[0] (manual, page N) <text>".
+        m = re.search(r"\[0\] \([^)]*\) (.+)", prompt)
+        quote = " ".join(m.group(1).split()[:8]) if m else ""
+        return json.dumps({"explanation": "Worn bearing.", "recommended_action": "Replace bearing.", "severity": "high",
+                           "source_index": 0, "evidence_quote": quote})
+
+    def no_backup(prompt, system=""):
+        raise RuntimeError("no backup writer in this test")
+
+    core.call_llm = stub_llm
+    core.call_llm_backup = no_backup                       # the backup text model (backend/core.py), unused here
+    core.primary_text_model = lambda: "stub-llm"
+    core.text_fallback_model = lambda: "stub-backup"
+    core.LAST_LLM = {"provider": None, "model": None}
     core.retrieve = retrieve
     core.FAKE_DEFECTS = []
     monkeypatch.setitem(sys.modules, "core", core)
@@ -54,6 +72,7 @@ def test_defect_report_is_accepted_and_diagnosis_cites_real_manual(backend):
     body = r.json()
     assert body["source_manual"].endswith(".pdf") and body["source_page"] >= 1  # a real manual page, not a placeholder
     assert body["status"] == "pending" and body["defect"].startswith("bearing wear")
+    assert "Worn bearing." in body["explanation"]  # the LLM path wrote it, not the "recommendation unavailable" path
 
 
 def test_agent_refuses_without_sources_instead_of_inventing(backend):

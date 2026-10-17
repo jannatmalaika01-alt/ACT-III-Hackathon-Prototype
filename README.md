@@ -231,4 +231,4 @@ Current build: [an UNVERIFIED case](docs/screenshots/09-unverified-needs-review.
 Earlier build (the layout is similar):
 
 [Login](docs/screenshots/01-login.png) · [Dashboard](docs/screenshots/02-dashboard.png) · [Upload](docs/screenshots/03-upload-page.png) · [Case details](docs/screenshots/04-case-details.png) ·
-[Detection results](docs/screenshots/05-detection-results.png) · [Approval](docs/screenshots/06-approval-workflow.png) · [Evolus task](docs/screenshots/07-evolus-task.png)
+[Approval](docs/screenshots/06-approval-workflow.png)
