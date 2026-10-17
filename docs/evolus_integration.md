@@ -54,16 +54,34 @@ Manual cited by our pipeline: corrosion_control_guide.pdf, page 2
 
 ## How the backend uses it
 
-- `RestEvolusClient.create_task` (in `backend/app/evolus.py`): POST the `input`, accept 202, then GET the execution **every 5 seconds for at most 240 seconds**
-  (`EVOLUS_POLL_INTERVAL`, `EVOLUS_POLL_TIMEOUT`). A few transient errors while polling (network, 429, 5xx) are tolerated.
-- **Failures never crash the request.** A timeout, a `Failed` run, a 401/403/404, a refused start (409) or too many network errors raise `EvolusError`; the case becomes
-  `task_failed` with the reason, and `POST /cases/{id}/retry-task` tries again. A retry starts a **new** run (it does not resume the old one); the timeout message names
-  the old execution id so it can be looked at in Evolus.
-- **The answer is stored on the case** in `diagnosis_raw.evolus` (an existing JSON column, no database change): `raw_text` (always kept), `parsed` (the nine fields),
-  `notes`, `execution_id`, `status`, `duration_seconds`. `safety_precautions`, `recommended_steps` and `citation` are lists; `confidence` is a number when the agent gave one
-  and otherwise `None` with its words in `confidence_text` (the live agent said "high"); `needs_human_review` is a boolean (if the reply does not say, it defaults to `true`).
-  The case's `evolus_task_id` is the execution id.
-- Approving waits for all of this, so the HTTP request can take minutes. The frontend dev proxy timeout was raised to 300 s (`experimental.proxyTimeout` in `frontend/next.config.ts`).
+- `RestEvolusClient.create_task` (in `backend/app/evolus.py`): POST the `input`, accept 202, then GET the execution **every 5 seconds for at most 600 seconds**
+  (`EVOLUS_POLL_INTERVAL`, `EVOLUS_POLL_TIMEOUT`; the default was 240 s until the 245 s run below showed it was too tight). A few transient errors while polling (network, 429, 5xx) are tolerated.
+- **Approving does not block.** In rest mode (`EVOLUS_BACKGROUND=true`, the default) `POST /cases/{id}/approve` saves the approval and returns at once with status `approved`; the Evolus step runs
+  in a background thread. The page keeps working and shows the run as in progress. With `EVOLUS_BACKGROUND=false` (or in mock mode) the step runs inside the request, as before.
+- **The run is remembered as soon as it exists.** The moment Evolus accepts the run, its execution id and start time are saved in `diagnosis_raw.evolus` (`state: running`), so a retry can find it even after a server restart.
+- **Retry resumes instead of restarting.** `POST /cases/{id}/retry-task` looks once at the earlier execution:
+  - `Pending` or `Running`: keep waiting for **that** run (no second run is started);
+  - `Completed`: use its answer (nothing is run again);
+  - `Failed`, or unknown (404, error, unreadable status): start a new run (the old id is kept as `previous_execution_id`).
+  A case that was left `approved` by a restart mid-run (nothing running) can be retried the same way.
+- **No two runs for one case at the same time.** Starting a run claims the case in memory; a second approve or retry while the first is running is refused with HTTP 409
+  ("An Evolus run for this case is already in progress"). The claim is always released when the run ends, even if it crashes. This guard lives in one backend process; with several backend processes
+  the resume rule above still prevents a second run for the same unfinished execution, but two processes could in theory both start a first run.
+- **Failures never crash the request.** A timeout, a `Failed` run, a 401/403/404, a refused start (409) or too many network errors raise `EvolusError`; the case becomes `task_failed` with the
+  reason (and the id of the run that did not finish), and Retry resumes or restarts as described above.
+- **The answer is stored on the case** in `diagnosis_raw.evolus` (an existing JSON column, no database change): `raw_text` (always kept), `parsed` (the nine fields), `notes`, `execution_id`, `status`,
+  `resumed`, `previous_execution_id`, `duration_seconds` (this call) and `evolus_seconds` (Evolus's own clock, completedAt minus requestedAt). `safety_precautions`, `recommended_steps` and `citation` are lists;
+  `confidence` is a number when the agent gave one and otherwise `None` with its words in `confidence_text` (the live agent said "high"); `needs_human_review` is a boolean (if the reply does not say, it defaults to `true`).
+  The case's `evolus_task_id` is the execution id. `GET /cases/{id}` also returns `evolus: {running, started_at, execution_id}`.
+
+## What the page shows
+
+- **While the agent works** (the case is `approved`, or the server says a run is in progress, including a retry): the "Evolus task" step spins and the right-hand card shows
+  *"Evolus agent is preparing the maintenance task, this can take a few minutes"* with the elapsed time (counted from the server's start time, so a reload shows the right value). The rest of the page stays usable and the case
+  is re-checked every 3 seconds. After 5 minutes it adds that the shared AI service is busy and that we keep waiting for up to 10 minutes.
+- **If the wait runs out** the card turns into a calm message: *"Evolus is taking longer than expected. Your approval is saved and the run may still finish; Retry picks it up where it left off."* with a **Retry** button (other
+  failures say the task could not be created this time). Retry is hidden while a run is in progress.
+- Approving or retrying shows a short notice instead of waiting: *"Approved. The Evolus agent is preparing the maintenance task; this can take a few minutes."*
 
 ## Timings (measured, shared endpoint)
 
@@ -72,9 +90,9 @@ Manual cited by our pipeline: corrosion_control_guide.pdf, page 2
 | `dbdee6ac-33ca-f111-bf5b-6045bd9ce552` (our end-to-end test) | 14:04:36 UTC | 14:08:41 UTC | **245 s** (Evolus's own timestamps) |
 | `f0a26733-32ca-f111-bf5b-6045bd9ce552` (the earlier example) | 13:53:59 UTC | 14:12:38 UTC | **about 18.6 minutes** (it stayed `Running` with 0 steps for a long time) |
 
-So "about 2 minutes" is the best case, not the rule. **The default 240 s timeout is too tight for this endpoint**: the end-to-end run above needed 245 s by Evolus's clock.
-It only passed because the test machine went to sleep while waiting and the client's clock (which does not count sleep) read 155.5 s. For a demo set `EVOLUS_POLL_TIMEOUT` higher (for example 600)
-and start the approval early.
+So "about 2 minutes" is the best case, not the rule. The first default of 240 s was too tight: the end-to-end run above needed 245 s by Evolus's clock (it only passed because the test machine went to sleep
+and the client's clock does not count sleep, so it read 155.5 s). **The default is now 600 s** (`EVOLUS_POLL_TIMEOUT`, in code and `.env.example`). Even that does not cover a run like the 19-minute one, which is why a timed-out
+case keeps its execution id and Retry resumes it: the run is not lost, and no second run is paid for.
 
 ## Proof of the end-to-end test
 
@@ -84,9 +102,17 @@ written by the backup writer DeepSeek-V4-Flash, so the primary writer did not gi
 confidence "high", `needs_human_review` false, and a summary that treats the CNN's `structural_crack` as low-trust. The agent's real reply is a test fixture
 (`REAL_REPLY` in `backend/tests/test_evolus_parser.py`).
 
+## How the resume and the guard were checked
+
+Unit tests with mocked HTTP (`backend/tests/test_evolus_resume.py`) cover: a Pending or Running run is resumed without a second POST, a Completed run is only read, a Failed or unknown run is replaced by a new one,
+the id is saved mid-run, a stalled `approved` case can be retried, a second approve or retry during a run gets 409 (also with two real threads), and the claim is released after a failure or a crash. I also made sure these tests fail
+when the guard or the resume logic is switched off. In addition, the real backend was run over HTTP against a small fake Evolus server whose run lasts 7 s with a 4 s wait limit: approve returned in under 0.01 s, a retry during the
+run got 409, the wait timed out at 4 s and kept the id, the retry returned at once and resumed the **same** run, which then completed (`task_created`, `resumed: true`), and the fake server saw exactly **one** POST. The real Evolus
+service was not used for this check, so the resume against the live API is verified only through the same GET endpoint used in the live end-to-end run above.
+
 ## What is not verified
 
 - A `Failed` run on the live service: the shape of its `error` field is assumed from the docs and tolerated, not observed.
 - The webhook path (`callbackUrl`) is not used.
-- Duplicate runs: a retry after a timeout starts another run while the first may still finish.
-- Timing under load: the two runs above are all the data there is.
+- The new progress and error states on the case page were checked with the type checker and the linter and through the API states they read, but not by looking at the page in a browser.
+- Timing under load: the two live runs above are all the data there is.
