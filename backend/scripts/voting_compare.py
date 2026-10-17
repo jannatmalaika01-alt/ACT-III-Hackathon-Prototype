@@ -252,7 +252,7 @@ def _ask(dd, model: str, path: str) -> dict:
         import httpx
         status = getattr(getattr(exc, "response", None), "status_code", None)
         kind = ("rate_limit" if status == 429 else "timeout" if isinstance(exc, (httpx.TimeoutException, TimeoutError))
-                else type(exc).__name__)
+                else getattr(exc, "kind", None) or type(exc).__name__)  # VisionAnswerError -> "parse_error"
         return {"label": None, "confidence": None, "latency": time.time() - start, "error": kind}
 
 

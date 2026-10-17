@@ -21,6 +21,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
@@ -34,9 +35,60 @@ AGREE, DISAGREE, SINGLE = "agree", "disagree", "single_detector"
 
 PROMPT = ("You are inspecting a photo of an industrial part for a factory quality check. Classify it as exactly "
           "ONE of these labels: normal, bearing_wear, structural_crack, corrosion.\n"
-          "bearing_wear = concentric circular scoring marks; structural_crack = a thin dark linear fracture line; "
-          "corrosion = scattered brown/orange rust speckles; normal = none of these.\n"
+          "- bearing_wear: any bearing, roller, race or bearing housing that shows wear, pitting, scoring, spalling, "
+          "discoloration or rust.\n"
+          "- corrosion: rust or oxidation on plates, bolts, pipes, frames, tanks or other non-bearing metal.\n"
+          "- structural_crack: cracks or spalling in walls, concrete, welds, castings or brackets.\n"
+          "- normal: clean, undamaged part with no visible defect.\n"
           'Reply with ONLY JSON: {"defect_type": "<label>", "confidence": <number between 0 and 1>}')
+
+
+class VisionAnswerError(RuntimeError):
+    """The vision model answered, but not with a usable label even after one retry. It is a clean, typed failure
+    (the detector counts as missing); it is deliberately NOT a ValueError."""
+    kind = "parse_error"
+
+
+_LABEL_KEYS = ("defect_type", "label", "defect", "class", "classification", "category", "type")
+_ALIASES = {"crack": "structural_crack", "cracks": "structural_crack", "cracked": "structural_crack",
+            "structural": "structural_crack", "rust": "corrosion", "rusty": "corrosion", "bearing": "bearing_wear",
+            "bearing_wear_": "bearing_wear", "no_defect": "normal", "none": "normal", "healthy": "normal",
+            "clean": "normal", "ok": "normal"}
+
+
+def parse_vision_answer(text: str) -> dict:
+    """{"label", "confidence"} from a vision model's reply. Tolerant: JSON inside prose or code fences, a few key
+    names, labels with spaces / hyphens / capitals / trailing punctuation, confidence as 0-1, 0-100 or "90%".
+    Raises VisionAnswerError when there is no usable label."""
+    text = (text or "").strip()
+    parsed = {}
+    a, b = text.find("{"), text.rfind("}")
+    if a != -1 and b > a:
+        try:
+            obj = json.loads(text[a:b + 1])
+            parsed = obj if isinstance(obj, dict) else {}
+        except json.JSONDecodeError:
+            parsed = {}
+    raw_label = next((parsed[k] for k in _LABEL_KEYS if parsed.get(k)), None)
+    if raw_label is None:  # broken JSON: pick the fields out of the text
+        m = re.search(r'"?(?:%s)"?\s*[:=]\s*"?([A-Za-z _-]+)' % "|".join(_LABEL_KEYS), text)
+        raw_label = m.group(1) if m else None
+    label = re.sub(r"[^a-z_]", "", norm_label(raw_label))
+    label = _ALIASES.get(label, label)
+    if label not in LABELS:
+        raise VisionAnswerError(f"unusable label: {label or 'none'}")
+    conf = parsed.get("confidence")
+    if conf is None:
+        m = re.search(r'confidence"?\s*[:=]\s*"?([0-9.]+)', text)
+        conf = m.group(1) if m else None
+    try:
+        conf = float(str(conf).strip().rstrip("%")) if conf is not None else None
+        if conf is not None and conf > 1:
+            conf = conf / 100.0 if conf <= 100 else None
+        conf = None if conf is None else max(0.0, min(1.0, conf))
+    except ValueError:
+        conf = None
+    return {"label": label, "confidence": conf}
 
 
 def enabled() -> bool:
@@ -144,19 +196,17 @@ def _call_vision(path: str, model: str) -> dict:
     effort = os.getenv("DUAL_VISION_EFFORT", "none").strip()
     if effort and effort != "omit":
         payload["reasoning_effort"] = effort
-    resp = core._post_with_retries({**p, "model": payload["model"]}, payload)
-    body = resp.json()
-    text = (body["choices"][0]["message"].get("content") or "").strip()
-    a, b = text.find("{"), text.rfind("}")
-    parsed = json.loads(text[a:b + 1]) if a != -1 and b > a else {}
-    label = norm_label(parsed.get("defect_type"))
-    if label not in LABELS:
-        raise ValueError(f"vision model returned an unknown label: {label or 'none'}")
-    try:
-        conf = max(0.0, min(1.0, float(parsed.get("confidence"))))
-    except (TypeError, ValueError):
-        conf = None
-    return {"label": label, "confidence": conf, "model": body.get("model") or payload["model"]}
+    for attempt in range(2):  # an unusable answer is asked again ONCE with the same prompt
+        resp = core._post_with_retries({**p, "model": payload["model"]}, payload)
+        body = resp.json()
+        try:
+            text = (body["choices"][0]["message"].get("content") or "")
+            got = parse_vision_answer(text)
+        except (VisionAnswerError, KeyError, IndexError, TypeError, AttributeError) as exc:
+            log.warning("vision model %s gave an unusable answer (attempt %d): %s", model, attempt + 1, type(exc).__name__)
+            continue
+        return {**got, "model": body.get("model") or payload["model"]}
+    raise VisionAnswerError(f"{model} gave no usable label after one retry")
 
 
 # ---------------- the rules (labels only) ----------------
