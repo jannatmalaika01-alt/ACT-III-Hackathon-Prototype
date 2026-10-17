@@ -16,10 +16,14 @@ class Settings:
     supabase_key: str
     storage_bucket: str
     webhook_secret: str
-    evolus_mode: str            # "mock" | "mcp"
+    evolus_mode: str            # "mock" | "rest" | "mcp"
     evolus_mock_fail_first_n: int
     max_upload_mb: int
     use_memory_db: bool
+    evolus_base_url: str = "https://api.evolus.ai/api/v1"
+    evolus_api_key: str = ""
+    evolus_application_id: str = ""
+    evolus_workflow_id: str = ""
 
 
 def _bool(value: str) -> bool:
@@ -37,4 +41,8 @@ def get_settings() -> Settings:
         evolus_mock_fail_first_n=int(os.getenv("EVOLUS_MOCK_FAIL_FIRST_N", "0") or 0),
         max_upload_mb=int(os.getenv("MAX_UPLOAD_MB", "10") or 10),
         use_memory_db=_bool(os.getenv("USE_IN_MEMORY_DB", "false")),
+        evolus_base_url=os.getenv("EVOLUS_BASE_URL", "https://api.evolus.ai/api/v1").strip().rstrip("/"),
+        evolus_api_key=os.getenv("EVOLUS_API_KEY", "").strip(),
+        evolus_application_id=os.getenv("EVOLUS_APPLICATION_ID", "").strip(),
+        evolus_workflow_id=os.getenv("EVOLUS_WORKFLOW_ID", "").strip(),
     )

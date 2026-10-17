@@ -4,7 +4,7 @@ import { useMemo, useRef, useState } from "react";
 import { Activity, Camera, FileText, UploadCloud } from "lucide-react";
 import Shell from "@/components/Shell";
 import { useToast } from "@/components/Toast";
-import { uploadCase } from "@/lib/api";
+import { analyzeCase, uploadCase } from "@/lib/api";
 import { getUser } from "@/lib/auth";
 import { MAX_UPLOAD_MB } from "@/lib/config";
 
@@ -43,9 +43,10 @@ export default function UploadPage() {
     if (!file) return;
     setBusy(true);
     try {
-      // INTEGRATION(KARIM, TITUS): this only stores the file. The AI diagnosis arrives a little later
-      // (the case page checks every 2 seconds), because the backend analyses in the background.
+      // Upload stores the file; /analyze then runs detection + the agent. Analysis takes a few seconds,
+      // so open the case now and let it start in the background (the case page checks every 2 seconds).
       const c = await uploadCase(file, getUser() ?? "unknown");
+      analyzeCase(c.id).catch((e: Error) => toast("error", `Analysis failed: ${e.message}`));
       toast("success", "File uploaded. The AI is analysing it.");
       router.push(`/cases/${c.id}`);
     } catch (e) {

@@ -157,3 +157,25 @@ def test_list_filter_by_status(client):
     assert [c["id"] for c in pending] == [b]
     assert [c["id"] for c in done] == [a]
     assert client.get("/cases", params={"status": "bogus"}).status_code == 422
+
+
+def test_get_case_file_returns_the_upload(client):
+    case = client.post("/cases", files={"file": ("part.png", b"\x89PNG-bytes", "image/png")},
+                       data={"uploaded_by": "tester"}).json()
+    r = client.get(f"/cases/{case['id']}/file")
+    assert r.status_code == 200
+    assert r.content == b"\x89PNG-bytes"
+    assert r.headers["content-type"] == "image/png"
+    assert 'filename="part.png"' in r.headers["content-disposition"]
+
+
+def test_get_case_file_unknown_case_is_404(client):
+    assert client.get("/cases/00000000-0000-0000-0000-000000000000/file").status_code == 404
+
+
+def test_get_case_file_falls_back_to_the_upload_cache(client):
+    case = client.post("/cases", files={"file": ("a.txt", b"hello", "text/plain")},
+                       data={"uploaded_by": "t"}).json()
+    client.app.state.repo.files.clear()  # storage lost the file; the local cache still has it
+    r = client.get(f"/cases/{case['id']}/file")
+    assert r.status_code == 200 and r.content == b"hello"

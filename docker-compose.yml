@@ -1,0 +1,33 @@
+# docker compose up --build        (needs backend/.env: copy backend/.env.example and fill it in)
+# Frontend: http://localhost:3000   Backend API docs: http://localhost:8000/docs
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    env_file: backend/.env          # secrets stay in this file, never in the image
+    ports: ["8000:8000"]
+    volumes:
+      - upload_cache:/app/backend/.upload_cache
+      - hf_cache:/root/.cache/huggingface   # embedding model, downloaded once
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request as u; u.urlopen('http://localhost:8000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  frontend:
+    build:
+      context: frontend
+      args:
+        BACKEND_URL: http://backend:8000
+        NEXT_PUBLIC_USE_MOCK: "false"
+        NEXT_PUBLIC_EVOLUS_URL: ${NEXT_PUBLIC_EVOLUS_URL:-}
+    ports: ["3000:3000"]
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  upload_cache:
+  hf_cache:

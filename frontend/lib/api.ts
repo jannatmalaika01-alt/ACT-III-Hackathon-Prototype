@@ -14,6 +14,7 @@ const JSON_HEADERS = { "Content-Type": "application/json" };
 //   GET  /cases/{id}                      case plus approvals plus events
 //   GET  /cases/{id}/file                 the uploaded file (needs the patch for Suve)
 //   POST /cases                           multipart: file, uploaded_by
+//   POST /cases/{id}/analyze              runs detection + the agent and stores the diagnosis (case stays pending)
 //   POST /cases/{id}/approve              json: decided_by, reason
 //   POST /cases/{id}/reject               json: decided_by, reason (required)
 //   POST /cases/{id}/retry-task
@@ -49,6 +50,7 @@ export interface Health {
   analyzer_mode?: string;
   reasoner?: string | null;
   llm_provider?: string | null;
+  llm_answered?: boolean;
   detector?: string | null;
 }
 
@@ -79,6 +81,13 @@ export async function uploadCase(file: File, uploadedBy: string): Promise<Case> 
   form.append("file", file);
   form.append("uploaded_by", uploadedBy);
   return normalizeCase(await http<unknown>("/cases", { method: "POST", body: form }));
+}
+
+// Runs the vision detector and the AI agent on an uploaded case; the diagnosis is stored on the case.
+// Can take several seconds (the LLM answers), so callers should not block the screen on it.
+export async function analyzeCase(id: string): Promise<Case> {
+  if (MOCK) return mockGet(id); // the mock upload adds its own diagnosis after a few seconds
+  return normalizeCase(await http<unknown>(`/cases/${id}/analyze`, { method: "POST" }));
 }
 
 // Returns the case. status is "task_created" or "task_failed". The approval is saved either way.

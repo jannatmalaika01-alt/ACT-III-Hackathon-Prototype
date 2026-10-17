@@ -10,7 +10,7 @@ from typing import Optional
 from uuid import UUID
 
 from fastapi import FastAPI, File, Form, Header, HTTPException, Query, Request, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
@@ -180,14 +180,21 @@ def create_app(settings: Optional[Settings] = None, repo=None, evolus=None) -> F
     def health():
         weights = _REPO_ROOT / "vision" / "weights" / "defect_cnn.pt"
         real_detector = weights.is_file()
+        try:
+            from core import llm_status
+            llm = llm_status()
+        except Exception:
+            llm = {"provider": None, "model": None, "answered": False}
         return {
             "status": "ok",
             "evolus_mode": settings.evolus_mode,
             "in_memory_db": settings.use_memory_db,
             # shown by the frontend
             "analyzer_mode": "vision" if real_detector else "simulated",
-            "reasoner": os.environ.get("LLM_MODEL", "openai/gpt-oss-120b"),
-            "llm_provider": os.environ.get("LLM_PROVIDER", "groq"),
+            # the provider/model that actually answered last (or the first configured one until then)
+            "reasoner": llm["model"],
+            "llm_provider": llm["provider"],
+            "llm_answered": llm["answered"],
             "detector": "defect_cnn" if real_detector else "simulated",
         }
 
@@ -216,6 +223,24 @@ def create_app(settings: Optional[Settings] = None, repo=None, evolus=None) -> F
     @app.get("/cases/{case_id}")
     def get_case(case_id: UUID):
         return service.get_case_detail(str(case_id))
+
+    @app.get("/cases/{case_id}/file")
+    def get_case_file(case_id: UUID):
+        """The file that was uploaded for this case, with its original content type.
+        Read from storage; falls back to the local upload cache if storage cannot return it."""
+        case = repo.get_case(str(case_id))
+        if case is None:
+            raise CaseNotFound(f"Case {case_id} not found")
+        data = repo.download_file(case["file_path"])
+        if data is None:
+            cached = _find_cached(str(case_id))
+            data = cached.read_bytes() if cached else None
+        if data is None:
+            raise HTTPException(404, "The uploaded file is no longer available")
+        name = (case.get("file_name") or "upload").replace('"', "").replace("\\", "")
+        return Response(content=data, media_type=case.get("content_type") or "application/octet-stream",
+                        headers={"Content-Disposition": f'inline; filename="{name}"',
+                                 "X-Content-Type-Options": "nosniff"})
 
     @app.post("/cases/{case_id}/diagnosis")
     def attach_diagnosis(case_id: UUID, body: DiagnosisIn):

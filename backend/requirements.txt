@@ -10,3 +10,7 @@ groq>=0.9
 langgraph>=0.2
 chromadb>=0.5
 sentence-transformers>=2.7
+numpy>=1.26
+pypdf>=4.0
+pillow>=10.0
+torch>=2.2   # the vision detector (vision/) runs inside /analyze

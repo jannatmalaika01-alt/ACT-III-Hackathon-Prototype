@@ -81,8 +81,8 @@ export default function Shell({ children }: { children: React.ReactNode }) {
             {state === "online" && health?.evolus_mode && (
               <div>
                 Evolus:{" "}
-                {health.evolus_mode === "mcp"
-                  ? <span className="text-emerald-400">live (MCP)</span>
+                {health.evolus_mode === "rest" || health.evolus_mode === "mcp"
+                  ? <span className="text-emerald-400">live ({health.evolus_mode.toUpperCase()})</span>
                   : <span className="text-amber-400">mock tasks</span>}
               </div>
             )}

@@ -106,4 +106,4 @@ def test_health_reports_analyzer_fields(client):
     assert body["status"] == "ok"
     assert body["analyzer_mode"] == ("vision" if real_detector else "simulated")
     assert body["detector"] == ("defect_cnn" if real_detector else "simulated")
-    assert body["llm_provider"] == "groq"
+    assert "llm_provider" in body and "reasoner" in body  # values depend on which keys are in .env (see test_tokenfactory)
