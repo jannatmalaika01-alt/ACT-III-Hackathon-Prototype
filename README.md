@@ -27,7 +27,7 @@ cd ACT-III-Hackathon-Prototype
 docker compose up --build
 ```
 
-The first build downloads Python and Node packages and takes a few minutes; later starts take seconds.
+The first build downloads Python and Node packages and a small search model (the backend image is about 2.6 GB) and takes a few minutes; later starts take seconds.
 When the log says both services are healthy, open:
 
 | What | Where |
@@ -211,7 +211,7 @@ Last/                   an old copy of early backend files, not used
 - **The CNN is weak on real photos** (right on 14 of 40) because it was trained on generated drawings; that is why the vision models decide and the CNN is advisory.
 - Mock-mode recommendations are a template copied from the manual, not an AI judgement. For a part that looks fine, the citation is a general page and not meaningful.
 - The in-memory database loses everything on restart. The demo login is not authentication: anyone who reaches the API can approve or reject. There is one backend process; the "one Evolus run per case" guard lives in it.
-- Scanned PDFs need the optional OCR program. Docker images were built and run as described above on the machine of whoever last ran `docker compose up --build`; Windows was not tried.
+- Scanned PDFs need the optional OCR program. `docker compose up --build` was tested from a clean clone (no `backend/.env`, no keys) on an Apple-silicon Mac with Docker Desktop 29.5: both containers became healthy, and a photo, a sensor report and a PDF each went through detection, citation, approval and a mock Evolus task. Intel, Linux and Windows machines were not tried.
 
 ## Security notes
 
