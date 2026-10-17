@@ -149,3 +149,5 @@ python scripts/vision_round1.py          # step 3 (about 40 min); add --retry-ra
 python scripts/vision_report.py          # rounds 1 and 2 tables
 python scripts/compare_models.py --full --reasoning-effort none --models <names>   # step 6
 ```
+
+> Note: the CNN figures in this file (for example "18 mistakes") were measured with the CNN weights from before Titus's retrain. Real-photo figures with the current weights are in the last section of `docs/voting_comparison.md`.

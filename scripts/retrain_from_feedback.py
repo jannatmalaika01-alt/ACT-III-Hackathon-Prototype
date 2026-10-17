@@ -3,8 +3,9 @@
     python scripts/retrain_from_feedback.py                      # uses data/feedback/ (git-ignored)
     python scripts/retrain_from_feedback.py --real-photos data/real_photos --epochs 12
 
-(a) Trains vision/weights/candidate_cnn.pt with the same loop as `python -m vision.train` (generated images + any
-    photos in data/train/ + the approved feedback photos, x3 weight like real photos).
+(a) Trains vision/weights/candidate_cnn.pt with the same loop AND recipe as `python -m vision.train` (1200 generated images per class,
+    65% of them blurred/darkened/rotated/noisy, 20 epochs, degraded validation images) plus any photos in data/train/ and the approved
+    feedback photos, x3 weight like real photos. So a candidate is comparable with the current defect_cnn.pt.
 (b) Prints the accuracy of the candidate AND of the current vision/weights/defect_cnn.pt on held-out sets: the
     generated test images (data/test_cases.csv), the real photos you name (labels.csv), and 20% of the feedback that was
     NOT used for training. Photos that were used for training are skipped in the real-photo comparison.
@@ -87,9 +88,10 @@ def main(argv=None) -> int:
     ap.add_argument("--feedback", default=str(REPO / "data" / "feedback"))
     ap.add_argument("--out", default=str(REPO / "vision" / "weights" / "candidate_cnn.pt"))
     ap.add_argument("--real-photos", default=None, help="folder with photos + labels.csv to compare on (default: data/real_photos if present)")
-    ap.add_argument("--per-class", type=int, default=700)
+    ap.add_argument("--per-class", type=int, default=1200)
     ap.add_argument("--val-per-class", type=int, default=150)
-    ap.add_argument("--epochs", type=int, default=12)
+    ap.add_argument("--epochs", type=int, default=20)
+    ap.add_argument("--degrade", type=float, default=0.65, help="share of training images that are blurred/darkened/rotated/noisy")
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--feedback-weight", type=int, default=3)
     ap.add_argument("--include-unverified", action="store_true")
@@ -114,7 +116,7 @@ def main(argv=None) -> int:
     print(f"feedback: {len(items)} approved photos -> {len(train_items)} for training, {len(hold_items)} held out")
 
     random.seed(0), np.random.seed(0), torch.manual_seed(0)
-    xs, ys = vtrain._synthetic(args.per_class, vtrain.TRAIN_SEED)
+    xs, ys = vtrain._synthetic(args.per_class, vtrain.TRAIN_SEED, args.degrade)
     rx, ry = vtrain._real_images()
     xs += rx * 3
     ys += ry * 3
@@ -122,13 +124,14 @@ def main(argv=None) -> int:
         with Image.open(it["path"]) as im:
             xs += [to_array(im.convert("RGB"))] * args.feedback_weight
         ys += [CLASSES.index(it["label"])] * args.feedback_weight
-    vx, vy = vtrain._synthetic(args.val_per_class, vtrain.VAL_SEED)
+    vx, vy = vtrain._synthetic(args.val_per_class, vtrain.VAL_SEED, 0.5)  # validation also contains degraded images, as in vision.train
     model, val_acc = vtrain.fit(xs, ys, vx, vy, args.epochs, args.lr)
 
     out.parent.mkdir(parents=True, exist_ok=True)
     torch.save(model.state_dict(), out)
     out.with_suffix(".json").write_text(json.dumps({
-        "classes": CLASSES, "val_accuracy": round(val_acc, 4), "train_images": len(xs), "feedback_photos": len(train_items),
+        "classes": CLASSES, "val_accuracy": round(val_acc, 4), "train_images": len(xs), "degraded_share": args.degrade, "epochs": args.epochs,
+        "feedback_photos": len(train_items),
         "trained_on": "synthetic + approved feedback", "NOT_PROMOTED": "copy over defect_cnn.pt by hand if it is better"}, indent=2))
     print(f"saved candidate {out}")
 

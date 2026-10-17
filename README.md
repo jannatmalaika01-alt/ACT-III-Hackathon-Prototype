@@ -212,7 +212,7 @@ Last/                   an old copy of early backend files, not used
   (up to 10 minutes), the page shows progress, and a timed-out run is resumed by Retry.
 - **Small tests.** On 40 hand-labelled Google photos the recommended setting answered 36 automatically and correctly, 1 silently wrong and sent 3 to a person, **but we tuned the prompt and one rule on those
   same photos**. On 15 fresh photos it got 13 correct, 1 silently wrong, 1 to a person. Differences of a photo or two are noise. Details and caveats are in `docs/voting_comparison.md`.
-- **The CNN is weak on real photos** (right on 14 of 40) because it was trained on generated drawings; that is why the vision models decide and the CNN is advisory.
+- **The CNN is weak on real photos** (right on 13 of 40 real photos and 4 of 15 fresh ones with the current weights; the previous weights got 14 of 40 and 7 of 15) because it was trained on generated drawings; that is why the vision models decide and the CNN is advisory.
 - Mock-mode recommendations are a template copied from the manual, not an AI judgement. For a part that looks fine, the citation is a general page and not meaningful.
 - The in-memory database loses everything on restart. The demo login is not authentication: anyone who reaches the API can approve or reject. There is one backend process; the "one Evolus run per case" guard lives in it.
 - Scanned PDFs need the optional OCR program. `docker compose up --build` was tested from a clean clone (no `backend/.env`, no keys) on an Apple-silicon Mac with Docker Desktop 29.5: both containers became healthy, and a photo, a sensor report and a PDF each went through detection, citation, approval and a mock Evolus task. Intel, Linux and Windows machines were not tried.

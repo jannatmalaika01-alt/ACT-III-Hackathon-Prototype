@@ -109,6 +109,12 @@ The agent cites a document, a page and a quoted passage. It names the document `
 What this does **not** do: it checks that the words exist in our manuals, not that the passage supports the agent's advice. A very short or generic quote can match somewhere by chance. The agent's library holds its own `.txt` versions of the manuals, so a re-flowed or edited
 version there could show up as `unverified` even though the advice is fine; the review flag is deliberately cautious. A quote that joins two separate places on a page will not match.
 
+### Two citation checks, two different jobs (both are kept)
+
+- `knowledge/verify.py` (Titus) checks **our own pipeline's contract**: the cited manual and page exist, each retrieved chunk is word for word on that PDF page, and the recommended action is copied from the evidence. It is used by `evaluate.py` and `vk_tests`, not at runtime.
+- `backend/app/citations.py` (ours) checks **the Evolus agent's free-text quotes** at runtime on every reply: fuzzy match (>= 90%) against the manuals, quotes corrected to the source text or marked unverified, and an unverified quote sets the human-review flag.
+- They do not overlap or conflict (different inputs, no shared state); after the merge both import and run, and their tests pass together.
+
 ## Timings (measured, shared endpoint)
 
 | Run | Requested | Completed | Duration |

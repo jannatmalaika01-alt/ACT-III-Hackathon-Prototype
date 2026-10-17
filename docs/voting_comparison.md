@@ -19,7 +19,7 @@ CNN is only advisory.** `DUAL_DETECTOR` itself defaults to off, but whenever it 
   they disagree a person decides. Both fail: the CNN answers alone and a person verifies.
 - Every detector's label and confidence is shown separately, with vote counts such as "2 of 3 say corrosion". Confidences are never averaged.
 
-**Why:** the CNN was trained on generated drawings and was right on only 14 of 40 real photos, so letting it veto the vision models
+**Why:** the CNN was trained on generated drawings and was right on only 14 of 40 real photos (13 of 40 after Titus's retrain, see the note at the end), so letting it veto the vision models
 (as `pair`, `unanimous` and `cnn_anchored` do) sends more than half of all photos to a person (57% to 62%). `vote` and
 `vision_primary` answer 36 of 40 automatically and ask a person once. In the new run `vision_primary` produced 3 silently wrong
 answers, none of them a bearing_wear/corrosion mix-up; with the low-confidence tie rule described below it produces 1 silently wrong answer
@@ -94,7 +94,7 @@ The two photos that changed are `img_11` and `img_34` (both truth: normal). The 
 No other scheme changes.
 
 **Said plainly: this rule rests on 2 photos in the set that was used to tune the prompt.** What justifies it is not those 2 photos but the
-CNN's own 0.70 cut-off: the CNN already tells people to double-check anything below it, and the CNN was right on only 14 of 40
+CNN's own 0.70 cut-off: the CNN already tells people to double-check anything below it, and the CNN was right on only 14 of 40 (13 of 40 with the current weights)
 real photos. The idea for the rule did come from looking at these failures, so the improvement here is optimistic. The held-out test on
 fresh photos (below) is the fair check, and no rule or threshold was changed after seeing it.
 
@@ -194,7 +194,7 @@ Wrong automatic answers: 1 (of which bearing_wear/corrosion confusions: 0).
 
 - One fresh photo is 6.7 percentage points. A 95% range for 13 out of 15 is roughly 62% to 96%, which includes the tuning-set result, so this neither
   confirms nor contradicts it. The silent-wrong rate looks higher (6.7% against 2.5%), but that is one photo in each set.
-- **The CNN alone got 7 of 15 right (47%)** on the fresh photos (14 of 40, 35%, on the tuning set): it is still weak on real photos. Every scheme that uses the vision
+- **The CNN alone got 7 of 15 right (47%)** on the fresh photos (14 of 40, 35%, on the tuning set) with the weights of that time (the current weights: see the note at the end): it is still weak on real photos. Every scheme that uses the vision
   models beats it; V and B answered 13 of 15 automatically.
 - **The one silent mistake, `fresh_17`, is a normal part that both vision models called bearing_wear.** The one photo sent to a person, `fresh_14`, is a normal part with
   a three-way split. Together with `img_11`, `img_12` and `img_34` earlier, the hard cases are mostly photos labelled **normal** that look like they have wear:
@@ -230,7 +230,7 @@ The rule was written before any real-photo result:
  (e) If the results are too close or too noisy with this few photos, keep the current mode.
 
 **Rule (b) was amended after the first real-photo run.** A CNN dissent that is shown as a low-trust note (scheme V) no longer counts as a silent
-override. The reason is the measurement: the CNN, trained on drawings, was right on only 14 of 40 real photos, so treating its
+override. The reason is the measurement: the CNN, trained on drawings, was right on only 14 of 40 real photos (13 of 40 with the current weights), so treating its
 disagreement as a veto would mostly cancel correct vision answers. For the other schemes (b) is unchanged. This amendment was made
 after seeing real-photo numbers, which is a reason to read the final decision with some caution. Rule (d): the schemes that wait for two
 vision models are over the limits (about 37 to 40 s average, over 150 s slowest) because Flash-Next is slow, and so is the pair A; this
@@ -359,3 +359,14 @@ cd backend
 PYTHONPATH=. python scripts/voting_compare.py --photos ../data/real_photos --answers ../data/voting_answers_v3.json --workers 4
 PYTHONPATH=. python scripts/voting_compare.py --replay-only --answers ../data/voting_answers_v2.json --per-photo V --baseline ../data/voting_answers.json
 ```
+
+## Note: re-measured with the retrained CNN weights (merge of origin/main)
+
+Every CNN figure above (14 of 40, 7 of 15, 18 mistakes on the synthetic hard set) was measured with the CNN weights we had before
+Titus's retrain. With the current `vision/weights/defect_cnn.pt` the CNN alone is right on **13 of 40** real photos (before: 14) and
+**4 of 15** fresh photos (before: 7); it is more often wrong with high confidence (22 of 40 and 9 of 15 wrong at >= 0.70, before 17 and 4).
+The saved answers of the two vision models were reused unchanged and only the CNN's answers were replaced (offline replay, no baseline file
+was overwritten). Scheme V (`vision_primary`) keeps its numbers: 36 of 40 correct, 2 silent wrong, 2 sent to a person on the 40 photos;
+13 of 15 correct, 1 silent wrong, 1 to a person on the 15 fresh photos. The CNN dissent note now appears on 23 of 40 and 10 of 15 photos.
+Pair / unanimity send more cases to a person with the weaker CNN (62-65% of the 40 photos, 73% of the 15). img_18 (corrosion) is now
+answered correctly by the CNN itself (corrosion, 0.60; before: structural_crack, 0.82) and by the vote (corrosion).
