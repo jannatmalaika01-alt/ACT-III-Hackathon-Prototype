@@ -69,6 +69,19 @@ def _quote_in_source(quote, source_text: str) -> bool:
 
 # ---------------- Nodes ----------------
 
+def _detector_notes(defect: dict) -> str:
+    """Text appended to a normal (automatic) explanation: the CNN's low-trust dissent and any detector warnings."""
+    notes = ""
+    dissent = defect.get("cnn_dissent")
+    if dissent:
+        notes += (f" Note (CNN dissent, low trust): the CNN said {dissent['label']} (confidence {dissent['confidence']}) "
+                  f"but the vision models agree on {defect['defect_type']}; the CNN was trained on drawings and is only "
+                  f"advisory.")
+    for w in defect.get("warnings") or []:
+        notes += f" Warning: {w}"
+    return notes
+
+
 def receive_defect(state: AgentState) -> dict:
     return {"needs_review": False}
 
@@ -103,8 +116,13 @@ def low_confidence(state: AgentState) -> dict:
             parts.append(f"{name} says {x['label']} (confidence {x.get('confidence')})" if x.get("label")
                          else f"{name} gave no answer")
         votes = f" Votes: {d['suggestion']}." if d.get("suggestion") else ""
-        why = ("The detectors DISAGREE: " + "; ".join(parts) + "." + votes +
-               " The confidences are from different models and are not combined.")
+        warn = "".join(f" Warning: {w}" for w in (d.get("warnings") or []))
+        if str(d.get("decision") or "").startswith("both vision models failed"):
+            why = ("BOTH VISION MODELS FAILED, so only the CNN answered (low trust: it was trained on drawings and is weak "
+                   "on real photos): " + "; ".join(parts) + "." + warn)
+        else:
+            why = ("The detectors DISAGREE: " + "; ".join(parts) + "." + votes + warn +
+                   " The confidences are from different models and are not combined.")
     else:
         why = (f"Detection confidence {defect['confidence']} is below the "
                f"{LOW_CONFIDENCE_THRESHOLD} threshold, so this may be a false positive.")
@@ -183,7 +201,8 @@ Reply with ONLY a JSON object, no other text:
         "diagnosis": {
             "defect": f"{defect['defect_type']} at {defect['location']}",
             "severity": severity,
-            "explanation": str(data.get("explanation") or output or "No explanation returned by the model.").strip(),
+            "explanation": (str(data.get("explanation") or output or "No explanation returned by the model.").strip()
+                            + _detector_notes(defect)),
             "recommended_action": str(
                 data.get("recommended_action") or "Schedule a manual inspection."
             ).strip(),

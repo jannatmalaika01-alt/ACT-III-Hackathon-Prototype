@@ -7,6 +7,11 @@ DUAL_MODE picks how the answers are combined (default `pair`, the original behav
     vote         the same three; 2-of-3 wins automatically; a 3-way split -> human review.
     cnn_anchored the same three; 2-of-3 wins, EXCEPT when the two vision models agree and outvote the CNN or when
                  there is a 3-way split: then a human decides.
+    vision_primary the two vision models decide; the CNN is only advisory (it was trained on drawings and is weak on
+                 real photos). They agree -> that label wins whatever the CNN says (a CNN that disagrees is shown as a
+                 low-trust "cnn_dissent" note, NOT a review). They disagree -> the CNN breaks the tie if it matches one of
+                 them; if it matches neither (3-way split) a human decides. If one vision model fails, the other plus the
+                 CNN decide (a disagreement -> human); if both fail, the CNN answers alone and a human verifies.
 A detector that fails or times out is MISSING: with two left they must agree; with one left it answers alone
 (`single_detector`); with none the caller falls back to the normal single-CNN path. An upload never fails because of this.
 
@@ -121,7 +126,7 @@ def prepare_image_for_vision(path: str) -> tuple:
         return raw, mimetypes.guess_type(path)[0] or "image/png"
 
 
-MODES = ("pair", "unanimous", "vote", "cnn_anchored")
+MODES = ("pair", "unanimous", "vote", "cnn_anchored", "vision_primary")
 
 
 def mode() -> str:
@@ -215,6 +220,8 @@ def decide_labels(dual_mode: str, cnn: Optional[str], v1: Optional[str], v2: Opt
     """Apply a mode's rule to the labels the detectors gave (None = missing).
     Returns {"status": "auto"|"review", "label", "reason", "ref"}. `label` is the automatic answer (None on review);
     `ref` is what a review is judged against: the CNN's label if it answered, else the leading label."""
+    if dual_mode == "vision_primary":
+        return _decide_vision_primary(cnn, v1, v2)
     pairs = [("cnn", cnn), ("v1", v1)] + ([("v2", v2)] if dual_mode != "pair" else [])
     present = [(k, l) for k, l in pairs if l]
     names = [l for _, l in present]
@@ -238,6 +245,35 @@ def decide_labels(dual_mode: str, cnn: Optional[str], v1: Optional[str], v2: Opt
     if dual_mode == "cnn_anchored" and cnn != top:
         return out("review", None, "CNN outvoted by both vision models")
     return out("auto", top, "unanimous" if count == 3 else "2-of-3")
+
+
+def _decide_vision_primary(cnn, v1, v2) -> dict:
+    """The vision models decide, the CNN is advisory. Extra keys: `dissent` (the CNN disagreed with an automatic
+    answer and is only noted) and `missing_vision` (which vision models gave no answer)."""
+    missing = [k for k, v in (("vision_model", v1), ("vision_model_2", v2)) if not v]
+
+    def out(status, label, reason, dissent=False):
+        return {"status": status, "label": label, "reason": reason, "ref": cnn or label or v1 or v2,
+                "dissent": dissent, "missing_vision": missing}
+
+    if v1 and v2:
+        if v1 == v2:
+            return out("auto", v1, "vision models agree", dissent=bool(cnn and cnn != v1))
+        if cnn in (v1, v2):
+            return out("auto", cnn, "CNN breaks the tie between the vision models")
+        if cnn is None:
+            return out("review", None, "vision models disagree (no CNN to break the tie)")
+        return out("review", None, "3-way split")
+    if v1 or v2:
+        only = v1 or v2
+        if cnn is None:
+            return out("review", None, "only one detector answered (a vision model)")
+        if cnn == only:
+            return out("auto", only, "vision model and CNN agree (the other vision model failed)")
+        return out("review", None, "vision model and CNN disagree (the other vision model failed)")
+    if cnn:
+        return out("review", None, "both vision models failed; CNN alone (low trust)")
+    return out("review", None, "no detector answered")
 
 
 # ---------------- comparison ----------------
@@ -279,26 +315,46 @@ def combine(dual_mode: str, cnn: Optional[dict], vlm: Optional[dict], vlm2: Opti
     d = decide_labels(dual_mode, cnn["label"] if cnn else None, vlm["label"] if vlm else None,
                       vlm2["label"] if vlm2 else None)
     votes, suggestion = _votes_text(names)
+    primary = dual_mode == "vision_primary"
     lead = d["label"] or (cnn["label"] if cnn else Counter(names).most_common(1)[0][0])
     if d["status"] == "review" and Counter(names).most_common(1)[0][1] > 1:
         lead = Counter(names).most_common(1)[0][0]          # the majority is the suggestion
-    owner = next(a for _, a in present if a["label"] == lead)  # first holder in order cnn, vision, vision 2
+    elif primary and d["status"] == "review":
+        lead = (vlm or vlm2 or cnn)["label"]                # no majority: the first vision model's label, never the CNN's
+    holders = [("vision_model", vlm), ("vision_model_2", vlm2), ("cnn", cnn)] if primary else \
+        [("cnn", cnn), ("vision_model", vlm), ("vision_model_2", vlm2)]
+    owner_key, owner = next((k, a) for k, a in holders if a is not None and a["label"] == lead)
     agreement = (SINGLE if len(present) == 1 else AGREE if len(set(names)) == 1 else DISAGREE)
+    if primary and vlm and vlm2:
+        agreement = AGREE if vlm["label"] == vlm2["label"] else DISAGREE   # the CNN's opinion does not count here
     review = d["status"] == "review"
+    warnings = [f"{out[k]['name']} failed ({out[k].get('error')})" for k in d.get("missing_vision", [])]
+    if primary and d["reason"].startswith("both vision models failed"):
+        warnings.append("Both vision models failed: only the CNN answered, and it is low trust on real photos.")
+    dissent = None
+    if d.get("dissent"):
+        dissent = {"label": cnn["label"], "confidence": cnn["confidence"], "trust": "low",
+                   "note": f"CNN (low trust) said {cnn['label']} ({cnn['confidence']}); the vision models agree on "
+                           f"{d['label']} and overrule it. This is a note, not a review."}
     if len(present) == 1:
         who = "CNN" if cnn else "vision model"
         note = f"Only one detector answered ({who})."
+    elif review and primary:
+        note = d["reason"][0].upper() + d["reason"][1:] + ": " + ", ".join(
+            f"{'CNN' if k == 'cnn' else out[k]['name']} says {a['label']}" for k, a in present) + "."
     elif review:
         note = ("Detectors disagree" if d["reason"] in ("disagree", "3-way split") else d["reason"]) + \
                ": " + ", ".join(f"{'CNN' if k == 'cnn' else out[k]['name']} says {a['label']}" for k, a in present) + "."
+    elif primary and not review:
+        note = d["reason"][0].upper() + d["reason"][1:] + f" ({suggestion})." + (" CNN dissent noted." if dissent else "")
     elif agreement == AGREE:
         note = "All detectors report the same defect."
     else:
         note = f"Majority decides ({suggestion}); mode {dual_mode}."
     out.update(
         agreement=agreement, needs_human_review=review, decision=d["reason"], votes=votes, suggestion=suggestion,
-        answer={"label": lead, "confidence": owner.get("confidence"),
-                "from": next(k for k, a in present if a is owner)},
+        answer={"label": lead, "confidence": owner.get("confidence"), "from": owner_key},
+        warnings=warnings, cnn_dissent=dissent,
         models_answered=["CNN" if k == "cnn" else out[k]["name"] for k, _ in present], note=note)
     return out
 
