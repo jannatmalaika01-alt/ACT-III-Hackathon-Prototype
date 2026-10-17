@@ -79,7 +79,7 @@ detector that fails or is slow is simply left out; the upload always works.
 **Turn it on.** In `backend/.env` set `DUAL_DETECTOR=on`. In the code it is off unless you set it. `/health` shows
 whether it is on, the mode and the models.
 
-**The four modes (`DUAL_MODE`).** **`pair` is the default and the only mode we recommend today.**
+**The four modes (`DUAL_MODE`).** **`pair` is the default in the code. The demo setup in `backend/.env.example` uses `vision_primary`** (see `docs/voting_comparison.md` for the 40-real-photo run and why).
 
 | Mode | Detectors | What it does |
 |---|---|---|
@@ -87,14 +87,16 @@ whether it is on, the mode and the models.
 | `unanimous` | CNN + both vision models | Automatic only if everyone agrees. Any disagreement: a person checks. |
 | `vote` | the same three | Two out of three win automatically. All three different: a person checks. |
 | `cnn_anchored` | the same three | Like `vote`, but if the two vision models agree with each other and outvote the CNN, a person checks instead of the vote deciding silently. |
+| `vision_primary` (**demo setting**) | the same three | The two vision models decide and the CNN is only advisory (it was trained on drawings and is weak on real photos). They agree: that label wins, and a disagreeing CNN is shown as a low-trust "CNN dissent" note, not a review. They disagree: the CNN breaks the tie if it matches one of them, otherwise a person checks. If a vision model fails, the other one plus the CNN decide (a person checks a disagreement); if both fail, a person verifies. |
 
 If one detector is missing, the other two must agree; if two are missing, the last one answers alone. The second vision
 model is `DUAL_VISION_MODEL_2` (default Gemma-4-31B-IT) and is only called by the three modes that need a third detector,
 so they cost one extra call per upload. The text model that writes the diagnosis stays **MiMo-V2.6-Flash**;
 **DeepSeek-V4-Flash** with `TOKENFACTORY_REASONING_EFFORT=none` is the documented backup (you switch it by hand).
 
-**The mode will only be changed after the real-photo run.** Until then `pair` stays the default. The rule for deciding is
-written down in `docs/voting_comparison.md` (it was written before any real-photo result).
+**How the mode was chosen.** On 40 real photos, `vision_primary` answered 36 automatically and asked a person once, with 3 silently
+wrong answers; the pair, `unanimous` and `cnn_anchored` asked a person for 57% to 62% of the photos. Those photos are Google images with
+hand-made labels, so small differences are noise. The decision rule, its one amendment, and every result are in `docs/voting_comparison.md`.
 
 **Limits you should know.**
 - Our test images are synthetic (made by the same generator that trained the CNN) and there are only about 20 independent
@@ -105,6 +107,20 @@ written down in `docs/voting_comparison.md` (it was written before any real-phot
 - Gemma-4-31B-IT and Qwen3.8-Flash-Next differ by amounts that are within noise on this test; Gemma was more accurate alone
   but the endpoint had worker outages for it, which is why Qwen3.8-Flash-Next is the default.
 - **MiMo-V2.6-Flash accepts images but cannot see them** (it answered "white" for a red square). Never use it as a vision model.
+
+**Photos sent to the vision models are shrunk first** (longest side 1024 px, JPEG quality 85; the CNN still sees the original). The
+prompt spells out each class (bearing_wear includes rusty bearings; corrosion is rust on non-bearing metal). A vision answer that is not
+usable is asked again once, then counted as a failed detector.
+
+**The writer.** The diagnosis text is written by **MiMo-V2.6-Flash**. If it times out, fails (5xx / 429), returns nothing or invalid JSON, or
+its evidence quote is not in the cited manual text, **DeepSeek-V4-Flash** (effort `none`; `TEXT_FALLBACK_MODEL`, `TEXT_FALLBACK_EFFORT`) is tried
+once. If that fails too, the case shows "recommendation unavailable" with the detector results and the manual citation, and a person
+decides. The result says which model wrote it (for example "written by DeepSeek-V4-Flash (fallback)").
+
+**Human-approved examples.** When a person approves an image case, the photo and the approved label are saved to `data/feedback/<class>/`
+(git-ignored; never the pipeline's own guesses, and nothing on reject). `python scripts/retrain_from_feedback.py` trains a *candidate*
+CNN into `vision/weights/candidate_cnn.pt` and prints its accuracy next to the current `defect_cnn.pt` on held-out data. It never overwrites
+`defect_cnn.pt`; promoting a candidate is a manual step. There is no "correct the label" step in the app yet.
 
 **Check it on real photos.** Put the photos and a `labels.csv` (header `filename,label`) in `data/real_photos/` (git-ignored), then:
 `cd backend && PYTHONPATH=. python scripts/real_photo_check.py --photos ../data/real_photos`

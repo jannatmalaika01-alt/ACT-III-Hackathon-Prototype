@@ -1,8 +1,149 @@
-# Voting experiment, Phase 1 (synthetic replay)
+# Voting experiment: real photos, final decision, and the earlier synthetic replay
 
-Six ways of combining the detectors, replayed offline from the answers already saved in the synthetic test. **No API
-calls were made in this replay.** This is only a sanity check: the real-photo run (Phase 2) is the deciding one.
-Nothing here declares a winner, and the app's default (`DUAL_MODE=pair`) is unchanged.
+This page records (1) the run on 40 real photos and the final decision, then (2) the earlier replay on synthetic images,
+which was only a sanity check.
+
+## Final decision
+
+**The demo uses `DUAL_MODE=vision_primary`: the two vision models (Qwen3.8-Flash-Next and Gemma-4-31B-IT) decide, and the
+CNN is only advisory.** In the code the default stays `pair`; the demo values are in `backend/.env.example`
+(`DUAL_DETECTOR=on`, `DUAL_MODE=vision_primary`, reasoning effort `none`). Rules of `vision_primary`:
+
+- The two vision models agree: that label is the answer, whatever the CNN says. If the CNN disagrees, it is shown as a low-trust
+  **CNN dissent note** (label and confidence) in the result and the explanation. It does not trigger a review.
+- They disagree: if the CNN matches one of them, that label wins; if it matches neither (a three-way split) a person decides.
+- One vision model fails (timeout, 5xx, unusable answer): the other vision model plus the CNN decide, with a warning; if
+  they disagree a person decides. Both fail: the CNN answers alone and a person verifies.
+- Every detector's label and confidence is shown separately, with vote counts such as "2 of 3 say corrosion". Confidences are never averaged.
+
+**Why:** the CNN was trained on generated drawings and was right on only 14 of 40 real photos, so letting it veto the vision models
+(as `pair`, `unanimous` and `cnn_anchored` do) sends more than half of all photos to a person (57% to 62%). `vote` and
+`vision_primary` answer 36 of 40 automatically and ask a person once. In the new run `vision_primary` produced 3 silently wrong
+answers, none of them a bearing_wear/corrosion mix-up.
+
+**Said plainly:** by the strict wording of rule (a) (fewest silent wrong answers) the unanimity scheme U comes first with 1 silent
+wrong answer, ahead of `vision_primary` with 3, but U asks a person about 25 of 40 photos (62%). A gap of 2 photos is inside the
+noise this page warns about, while the gap in human workload (2% against 62%) is large, so the choice rests on the practical
+difference and on your decision that the vision models decide. It is a judgment call, not something rule (a) alone produces.
+
+## Real photos: 40 photos, old run against new run
+
+The 40 photos are **Google images with labels made by hand**, so a few of the labels could be arguable, the models may have seen
+some of these pictures before, and **small differences are noise** (one photo is 2.5 percentage points).
+
+- **Old run** = `data/voting_answers.json`: the first prompt, full-size photos. **Replayed offline; no API calls were made for it.**
+- **New run** = `data/voting_answers_v2.json`: the new prompt with explicit class definitions, photos shrunk to 1024 px (JPEG q85),
+  parse retry. Run on the same 40 photos at 15 requests/min, 4 photos in parallel.
+
+**Caution about the improvement.** The new prompt was written after seeing which photos failed (rusty bearings called corrosion) and then
+tested on those same 40 photos. Part of the improvement is therefore tuning to this set. Treat it as encouraging, and confirm it on
+photos that were not used to write the prompt. The temperature is 0.2, so a repeat run will differ a little. Also, the first replay
+used the OLD prompt and OLD full-size photos, so old and new differ in the prompt, the image size and chance, not in one thing.
+
+### Old run (old prompt, full-size photos)
+
+| Scheme | Auto answers correct | SILENT wrong | CNN right but outvoted | CNN dissent noted | Human review (rate) | False alarms | Good flags (CNN was wrong) | Extra calls per upload | Latency avg / max |
+|---|---|---|---|---|---|---|---|---|---|
+| 0  CNN alone | 14 | **26** | 0 | - | 0 (0%) | 0 | 0 | 0 | 0.3s / 10.7s |
+| A  Pair: CNN + Flash-Next | 12 | **8** | 0 | - | 20 (50%) | 2 | 18 | 1 | 36.7s / 87.8s |
+| A' Pair: CNN + Gemma | 12 | **7** | 0 | - | 21 (52%) | 2 | 19 | 1 | 11.3s / 122.2s |
+| B  3-way vote (2-of-3) | 27 | **9** | 1 | - | 4 (10%) | 2 | 2 | 2 | 39.4s / 122.2s |
+| C  3-way vote, CNN outvoted -> review | 11 | **7** | 0 | - | 22 (55%) | 3 | 19 | 2 | 39.4s / 122.2s |
+| U  Unanimity (all must agree) | 11 | **7** | 0 | - | 22 (55%) | 3 | 19 | 2 | 39.4s / 122.2s |
+| V  Vision-primary (CNN advisory) | 27 | **9** | 1 | 18 | 4 (10%) | 2 | 2 | 2 | 39.4s / 122.2s |
+
+Facts about these images: 3-way splits (all three detectors answered, three different labels): 1; CNN right but outvoted by both vision models: 1; images with a missing detector answer: CNN 0, Flash-Next 2, Gemma 1.
+
+### New run (new prompt, resized photos)
+
+| Scheme | Auto answers correct | SILENT wrong | CNN right but outvoted | CNN dissent noted | Human review (rate) | False alarms | Good flags (CNN was wrong) | Extra calls per upload | Latency avg / max |
+|---|---|---|---|---|---|---|---|---|---|
+| 0  CNN alone | 14 | **26** | 0 | - | 0 (0%) | 0 | 0 | 0 | 0.1s / 0.8s |
+| A  Pair: CNN + Flash-Next | 14 | **3** | 0 | - | 23 (57%) | 0 | 23 | 1 | 36.9s / 156.5s |
+| A' Pair: CNN + Gemma | 14 | **2** | 0 | - | 24 (60%) | 0 | 24 | 1 | 13.1s / 72.4s |
+| B  3-way vote (2-of-3) | 36 | **3** | 0 | - | 1 (2%) | 0 | 1 | 2 | 39.6s / 156.5s |
+| C  3-way vote, CNN outvoted -> review | 14 | **3** | 0 | - | 23 (57%) | 0 | 23 | 2 | 39.6s / 156.5s |
+| U  Unanimity (all must agree) | 14 | **1** | 0 | - | 25 (62%) | 0 | 25 | 2 | 39.6s / 156.5s |
+| V  Vision-primary (CNN advisory) | 36 | **3** | 0 | 22 | 1 (2%) | 0 | 1 | 2 | 39.6s / 156.5s |
+
+Facts about these images: 3-way splits (all three detectors answered, three different labels): 0; CNN right but outvoted by both vision models: 0; images with a missing detector answer: CNN 0, Flash-Next 1, Gemma 0.
+
+How to read: **silent wrong** = answered automatically and wrong, nobody asked. **CNN dissent noted** = the CNN disagreed with the
+final answer and was only noted (scheme V). **Human review** = sent to a person. Latency is the slowest detector the scheme waits for.
+
+### Scheme V, every wrong or flagged photo
+
+Old run (9 wrong, **6 of them bearing_wear/corrosion mix-ups**, 4 sent to a person):
+
+| Photo | Truth | CNN | Flash-Next | Gemma | Final answer | Verdict |
+|---|---|---|---|---|---|---|
+| img_02.jpg | bearing_wear | corrosion (0.83) | corrosion (0.95) | corrosion (0.92) | corrosion | WRONG: bearing_wear/corrosion CONFUSION |
+| img_11.jpg | normal | corrosion (0.43) | corrosion (0.95) | corrosion (0.92) | corrosion | WRONG: other error |
+| img_12.jpg | normal | bearing_wear (0.46) | -- (ValueError) | normal (0.95) | HUMAN REVIEW | review: vision model and CNN disagree (the other vision model failed) |
+| img_17.jpg | structural_crack | bearing_wear (0.62) | corrosion (0.95) | corrosion (0.95) | corrosion | WRONG: other error |
+| img_21.jpg | bearing_wear | bearing_wear (0.63) | corrosion (0.95) | corrosion (0.95) | corrosion | WRONG: bearing_wear/corrosion CONFUSION |
+| img_22.jpg | bearing_wear | corrosion (1.00) | corrosion (0.99) | corrosion (0.98) | corrosion | WRONG: bearing_wear/corrosion CONFUSION |
+| img_24.jpg | bearing_wear | bearing_wear (0.55) | -- (ValueError) | corrosion (0.85) | HUMAN REVIEW | review: vision model and CNN disagree (the other vision model failed) |
+| img_25.jpg | bearing_wear | structural_crack (0.75) | bearing_wear (0.95) | corrosion (0.92) | HUMAN REVIEW | review: 3-way split |
+| img_26.jpg | bearing_wear | corrosion (0.74) | corrosion (0.98) | corrosion (0.98) | corrosion | WRONG: bearing_wear/corrosion CONFUSION |
+| img_27.jpg | bearing_wear | corrosion (0.94) | corrosion (0.98) | corrosion (0.98) | corrosion | WRONG: bearing_wear/corrosion CONFUSION |
+| img_28.jpg | bearing_wear | bearing_wear (0.70) | corrosion (0.98) | -- (timeout) | HUMAN REVIEW | review: vision model and CNN disagree (the other vision model failed) |
+| img_30.jpg | bearing_wear | corrosion (0.89) | corrosion (0.95) | corrosion (0.92) | corrosion | WRONG: bearing_wear/corrosion CONFUSION |
+| img_39.jpg | structural_crack | corrosion (0.98) | corrosion (0.99) | corrosion (0.98) | corrosion | WRONG: other error |
+
+New run (3 wrong, **0 bearing_wear/corrosion mix-ups**, 1 sent to a person):
+
+| Photo | Truth | CNN | Flash-Next | Gemma | Final answer | Verdict |
+|---|---|---|---|---|---|---|
+| img_11.jpg | normal | corrosion (0.43) | bearing_wear (0.78) | corrosion (0.95) | corrosion | WRONG: other error |
+| img_12.jpg | normal | bearing_wear (0.46) | -- (parse_error) | normal (0.92) | HUMAN REVIEW | review: vision model and CNN disagree (the other vision model failed) |
+| img_34.jpg | normal | bearing_wear (0.37) | bearing_wear (0.95) | normal (0.95) | bearing_wear | WRONG: other error |
+| img_39.jpg | structural_crack | corrosion (0.98) | corrosion (0.99) | corrosion (0.98) | corrosion | WRONG: other error |
+
+- `img_11` and `img_34`: the vision models disagreed and the CNN broke the tie with a very low confidence (0.43 and 0.37) in the
+  wrong direction. Letting a low-confidence CNN break ties produced 2 of the 3 silent mistakes. A possible follow-up is to send
+  such ties to a person instead (for example when the CNN confidence is below 0.70). That would turn these 2 into reviews, but it is a
+  hypothesis from 2 photos in a set already used to tune the prompt, so it is **not** implemented.
+- `img_39`: all three detectors agree on corrosion for a photo labelled structural_crack; the label itself may be arguable.
+- `img_12`: Flash-Next returned an unusable answer twice (in both runs), so Gemma plus the CNN were compared and disagreed: a person decides.
+- The complete 40-photo list for any scheme: `python scripts/voting_compare.py --replay-only --answers ../data/voting_answers_v2.json --per-photo V`.
+
+### Vision-model latency, before and after resizing
+
+| Vision model | Before: avg / slowest | After: avg / slowest | Avg of successful calls before -> after | Errors before | Errors after |
+|---|---|---|---|---|---|
+| Qwen3.8-Flash-Next | 36.7s / 87.8s | 36.9s / 156.5s | 34.6s -> 33.9s | ValueError x2 | parse_error x1 |
+| Gemma-4-31B-IT | 11.3s / 122.2s | 13.1s / 72.4s | 8.5s -> 13.1s | timeout x1 | none |
+
+**Resizing did not make the models faster.** Flash-Next stays around 35 s per photo, so the slowness is on the endpoint, not the image
+size (its slowest call, 156 s, is `img_12`, which was asked twice). Gemma's slowest call and its timeout improved, but its average got
+a little longer. The new run sent 4 photos at once, which can itself add queueing on the shared endpoint, so the two sets of
+latencies are not a clean before/after.
+
+### Decision rule (amended once)
+
+The rule was written before any real-photo result:
+
+ (a) The scheme with the fewest SILENT wrong answers wins.
+ (b) A scheme where the vision models outvote a CNN that was right is OUT, unless that case is flagged for a human.
+ (c) Among ties, the lowest human-review rate wins.
+ (d) Extra calls only matter if the average latency exceeds about 12 s or the slowest exceeds about 45 s.
+ (e) If the results are too close or too noisy with this few photos, keep the current mode.
+
+**Rule (b) was amended after the first real-photo run.** A CNN dissent that is shown as a low-trust note (scheme V) no longer counts as a silent
+override. The reason is the measurement: the CNN, trained on drawings, was right on only 14 of 40 real photos, so treating its
+disagreement as a veto would mostly cancel correct vision answers. For the other schemes (b) is unchanged. This amendment was made
+after seeing real-photo numbers, which is a reason to read the final decision with some caution. Rule (d): the schemes that wait for two
+vision models are over the limits (about 37 to 40 s average, over 150 s slowest) because Flash-Next is slow, and so is the pair A; this
+is a latency problem of the model, not of the voting rule.
+
+**20 to 40 photos can only reveal large differences.** The large differences here are: the CNN alone is far worse than any scheme that
+uses the vision models (26 silent mistakes against 3), and `pair` / `unanimous` / `cnn_anchored` hand over 57% to 62% of photos to a person while
+`vote` / `vision_primary` hand over 2%. The differences among silent-wrong counts of 1, 2 and 3 are not large.
+
+---
+
+# Earlier replay on synthetic images (Phase 1, a sanity check only)
 
 ## The schemes (and the app setting each one matches)
 
@@ -90,21 +231,11 @@ Facts about these images: 3-way splits (all three detectors answered, three diff
   mistake on real photos. C and U exist to guard against that, at the cost of asking a human more often.
 - **Latency:** schemes with three detectors average 8.6 s and the slowest took 42.6 s (the pair A: 5.1 s and 32.2 s).
 
-## Decision rule (written now, before any real-photo result)
+## Decision rule at the time of this replay
 
- (a) The scheme with the fewest SILENT wrong answers wins.
- (b) A scheme where the vision models outvote a CNN that was right is OUT, unless that case is flagged for a human.
- (c) Among ties, the lowest human-review rate wins.
- (d) Extra calls only matter if the average latency exceeds about 12 s or the slowest exceeds about 45 s.
- (e) If the results are too close or too noisy with this few photos, KEEP `pair` (the default).
-
-**20 to 40 real photos can only reveal large differences.** A gap of one to three photos is noise, and in that case the rule
-says to keep `pair`.
-
-Applying the rule mechanically to the synthetic numbers (a sanity check, not a decision): A, B, C and U tie at 0 silent
-wrong answers; nobody is out under (b) because no correct CNN answer was silently outvoted; B has the lowest review rate
-(2%) and its latency stays under the limits in (d) (8.6 s average, 42.6 s slowest, which is close to the 45 s limit); but
-the images are about 20 independent scenes, so by (e) this is too close to move away from `pair`.
+The same rule as above, before rule (b) was amended; at that time (e) said to keep `pair`. Applying it mechanically to the synthetic
+numbers (a sanity check, not a decision): A, B, C and U tie at 0 silent wrong answers; B has the lowest review rate (2%); but the
+images are about 20 independent scenes, so by (e) this was too close to move away from `pair`.
 
 ## How much to trust this
 
@@ -116,15 +247,16 @@ the images are about 20 independent scenes, so by (e) this is too close to move 
 - One run, one setting (`reasoning_effort none`), and the shared endpoint's load changes latencies a lot.
 - **This replay is only a sanity check. The real-photo run is the deciding one.**
 
-## Phase 2: the same comparison on real photos
+## Phase 2: how the real-photo run is done
 
-`backend/scripts/voting_compare.py` calls the CNN, Qwen3.8-Flash-Next and Gemma-4-31B-IT once per photo
-(`reasoning_effort none`, paced to 15 requests/min, a rate-limited answer is retried once), saves every raw answer to
-`data/voting_answers.json` (git-ignored, like `data/real_photos/`), then prints the same table for all six schemes. 
-`--replay-only` re-scores the saved file with no API call.
+`backend/scripts/voting_compare.py` calls the CNN, Qwen3.8-Flash-Next and Gemma-4-31B-IT once per photo (`reasoning_effort none`,
+15 requests/min, a rate-limited answer is retried once, `--workers N` for several photos at once), saves every raw answer to a
+git-ignored file (`--answers PATH`; the first run's `data/voting_answers.json` was kept as the baseline and never overwritten), and then
+prints the table for schemes 0, A, A', B, C, U and V. `--replay-only` re-scores a saved file with no API call; `--per-photo V` lists every
+photo; `--baseline OLD.json` prints the latency before/after.
 
 ```bash
 cd backend
-PYTHONPATH=. python scripts/voting_compare.py --photos ../data/real_photos      # photos + labels.csv in that folder
-PYTHONPATH=. python scripts/voting_compare.py --replay-only                     # re-score, no API call
+PYTHONPATH=. python scripts/voting_compare.py --photos ../data/real_photos --answers ../data/voting_answers_v3.json --workers 4
+PYTHONPATH=. python scripts/voting_compare.py --replay-only --answers ../data/voting_answers_v2.json --per-photo V --baseline ../data/voting_answers.json
 ```
