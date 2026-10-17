@@ -128,7 +128,7 @@ def _detect_dual(case_id: str, location: Optional[str]):
         "image_ref": path.name,
         "needs_human_review": dual["needs_human_review"],
         "detectors": {k: dual[k] for k in ("mode", "cnn", "vision_model", "vision_model_2", "agreement", "votes",
-                                            "suggestion", "models_answered", "decision", "warnings") if k in dual},
+                                            "suggestion", "models_answered", "decision", "warnings", "cnn_tie") if k in dual},
         "cnn_dissent": dual.get("cnn_dissent"),
         "warnings": dual.get("warnings") or [],
     }

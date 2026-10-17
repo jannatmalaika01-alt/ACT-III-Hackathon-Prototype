@@ -11,7 +11,10 @@ CNN is only advisory.** In the code the default stays `pair`; the demo values ar
 
 - The two vision models agree: that label is the answer, whatever the CNN says. If the CNN disagrees, it is shown as a low-trust
   **CNN dissent note** (label and confidence) in the result and the explanation. It does not trigger a review.
-- They disagree: if the CNN matches one of them, that label wins; if it matches neither (a three-way split) a person decides.
+- They disagree: if the CNN matches one of them **and its own confidence is at least 0.70** (the CNN's "a person should verify visually"
+  cut-off, `LOW_CONFIDENCE`, defined once in `vision/thresholds.py`), that label wins. If the CNN matches one of them but is below 0.70, it is
+  not trusted to break the tie: the diagnosis is UNVERIFIED and a person decides, and the explanation shows the CNN's label and
+  confidence and says it was not confident enough. If it matches neither (a three-way split) a person decides.
 - One vision model fails (timeout, 5xx, unusable answer): the other vision model plus the CNN decide, with a warning; if
   they disagree a person decides. Both fail: the CNN answers alone and a person verifies.
 - Every detector's label and confidence is shown separately, with vote counts such as "2 of 3 say corrosion". Confidences are never averaged.
@@ -19,12 +22,14 @@ CNN is only advisory.** In the code the default stays `pair`; the demo values ar
 **Why:** the CNN was trained on generated drawings and was right on only 14 of 40 real photos, so letting it veto the vision models
 (as `pair`, `unanimous` and `cnn_anchored` do) sends more than half of all photos to a person (57% to 62%). `vote` and
 `vision_primary` answer 36 of 40 automatically and ask a person once. In the new run `vision_primary` produced 3 silently wrong
-answers, none of them a bearing_wear/corrosion mix-up.
+answers, none of them a bearing_wear/corrosion mix-up; with the low-confidence tie rule described below it produces 1 silently wrong answer
+and sends 3 of 40 photos to a person.
 
-**Said plainly:** by the strict wording of rule (a) (fewest silent wrong answers) the unanimity scheme U comes first with 1 silent
-wrong answer, ahead of `vision_primary` with 3, but U asks a person about 25 of 40 photos (62%). A gap of 2 photos is inside the
-noise this page warns about, while the gap in human workload (2% against 62%) is large, so the choice rests on the practical
-difference and on your decision that the vision models decide. It is a judgment call, not something rule (a) alone produces.
+**Said plainly:** before the tie rule, rule (a) (fewest silent wrong answers) put the unanimity scheme U first with 1 silent wrong
+answer, ahead of `vision_primary` with 3, but U asks a person about 25 of 40 photos (62%). With the tie rule `vision_primary` also has 1
+silent wrong answer and asks a person for 3 of 40 (8%). A gap of 2 photos is inside the noise this page warns about, while the gap in
+human workload is large, so the choice rests on the practical difference and on the decision that the vision models decide. It is a
+judgment call, not something rule (a) alone produces, and the tie rule was added after looking at these same photos (see below).
 
 ## Real photos: 40 photos, old run against new run
 
@@ -71,7 +76,31 @@ Facts about these images: 3-way splits (all three detectors answered, three diff
 How to read: **silent wrong** = answered automatically and wrong, nobody asked. **CNN dissent noted** = the CNN disagreed with the
 final answer and was only noted (scheme V). **Human review** = sent to a person. Latency is the slowest detector the scheme waits for.
 
+### Low-confidence tie rule (added after the new run)
+
+**What changed.** In `vision_primary`, when Flash-Next and Gemma disagree, the CNN breaks the tie only if its confidence is at least the
+CNN's own cut-off (0.70, `LOW_CONFIDENCE`, read from `vision/thresholds.py`; the number is not repeated in the rule). Below it, the case is
+UNVERIFIED and goes to a person. When the two vision models agree nothing changes.
+
+Same 40 saved answers (`data/voting_answers_v2.json`), replayed offline with no API calls:
+
+| Scheme V | Auto answers correct | Silent wrong | Human review | CNN dissent noted |
+|---|---|---|---|---|
+| Before the tie rule | 36 | 3 | 1 (2%) | 22 |
+| After the tie rule | 36 | **1** | 3 (8%) | 22 |
+
+The two photos that changed are `img_11` and `img_34` (both truth: normal). The vision models disagreed, and the CNN, at confidence 0.43 and
+0.37, picked the wrong side; they now go to a person. The one silent mistake left is `img_39`, where all three detectors agree on corrosion.
+No other scheme changes.
+
+**Said plainly: this rule rests on 2 photos in the set that was used to tune the prompt.** What justifies it is not those 2 photos but the
+CNN's own 0.70 cut-off: the CNN already tells people to double-check anything below it, and the CNN was right on only 14 of 40
+real photos. The idea for the rule did come from looking at these failures, so the improvement here is optimistic. The held-out test on
+fresh photos (below) is the fair check, and no rule or threshold was changed after seeing it.
+
 ### Scheme V, every wrong or flagged photo
+
+(Listed as measured by the new run, before the tie rule.)
 
 Old run (9 wrong, **6 of them bearing_wear/corrosion mix-ups**, 4 sent to a person):
 
@@ -101,9 +130,7 @@ New run (3 wrong, **0 bearing_wear/corrosion mix-ups**, 1 sent to a person):
 | img_39.jpg | structural_crack | corrosion (0.98) | corrosion (0.99) | corrosion (0.98) | corrosion | WRONG: other error |
 
 - `img_11` and `img_34`: the vision models disagreed and the CNN broke the tie with a very low confidence (0.43 and 0.37) in the
-  wrong direction. Letting a low-confidence CNN break ties produced 2 of the 3 silent mistakes. A possible follow-up is to send
-  such ties to a person instead (for example when the CNN confidence is below 0.70). That would turn these 2 into reviews, but it is a
-  hypothesis from 2 photos in a set already used to tune the prompt, so it is **not** implemented.
+  wrong direction (2 of the 3 silent mistakes). The low-confidence tie rule above now sends these to a person.
 - `img_39`: all three detectors agree on corrosion for a photo labelled structural_crack; the label itself may be arguable.
 - `img_12`: Flash-Next returned an unusable answer twice (in both runs), so Gemma plus the CNN were compared and disagreed: a person decides.
 - The complete 40-photo list for any scheme: `python scripts/voting_compare.py --replay-only --answers ../data/voting_answers_v2.json --per-photo V`.

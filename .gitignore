@@ -11,3 +11,6 @@ data/real_photos/
 data/voting_answers*.json
 data/feedback/
 vision/weights/candidate_cnn.*
+data/fresh_photos/
+data/box_answers.json
+data/box_test/

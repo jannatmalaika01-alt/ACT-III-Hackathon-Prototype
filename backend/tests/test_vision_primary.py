@@ -18,14 +18,14 @@ def det(label, conf=0.9, model=None):
     return None if label is None else {"label": label, "confidence": conf, **({"model": model} if model else {})}
 
 
-def run(cnn, flash, gemma):
+def run(cnn, flash, gemma, cnn_conf=0.47):
     def fn(value):
         def call(path):
             if value is None:
                 raise RuntimeError("failed")
             return value
         return call
-    return dd.run_dual("x.png", fn(det(cnn, 0.47) if cnn else None), fn(det(flash, 0.95, "Flash") if flash else None),
+    return dd.run_dual("x.png", fn(det(cnn, cnn_conf) if cnn else None), fn(det(flash, 0.95, "Flash") if flash else None),
                        timeout=2, dual_mode="vision_primary", vlm2_fn=fn(det(gemma, 0.85, "Gemma") if gemma else None))
 
 
@@ -55,11 +55,65 @@ def test_no_dissent_when_the_cnn_agrees():
 
 
 @pytest.mark.parametrize("flash,gemma,expected", [(C, N, C), (C, N, N), (B, C, B), (B, C, C)])
-def test_vision_models_disagree_and_the_cnn_breaks_the_tie(flash, gemma, expected):
-    r = run(expected, flash, gemma)
+def test_vision_models_disagree_and_a_confident_cnn_breaks_the_tie(flash, gemma, expected):
+    r = run(expected, flash, gemma, cnn_conf=0.9)
     assert (r["needs_human_review"], r["answer"]["label"], r["agreement"]) == (False, expected, "disagree")
     assert r["decision"] == "CNN breaks the tie between the vision models"
     assert r["cnn_dissent"] is None and r["suggestion"] == "2 of 3 say " + expected.replace("_", " ")
+
+
+# ---------------- the low-confidence tie rule ----------------
+
+@pytest.mark.parametrize("cnn_matches", ["flash", "gemma"])
+def test_tie_cnn_matches_and_is_confident_cnn_wins(cnn_matches):
+    cnn = C if cnn_matches == "flash" else N
+    r = run(cnn, C, N, cnn_conf=0.9)                               # confidence 0.9 >= 0.70
+    assert (r["needs_human_review"], r["answer"]["label"], r["decision"]) == \
+        (False, cnn, "CNN breaks the tie between the vision models")
+    assert r["cnn_tie"] is None
+
+
+@pytest.mark.parametrize("cnn_matches", ["flash", "gemma"])
+def test_tie_cnn_matches_but_is_not_confident_goes_to_a_person(cnn_matches):
+    cnn = C if cnn_matches == "flash" else N
+    r = run(cnn, C, N, cnn_conf=0.5)                               # confidence 0.5 < 0.70
+    assert r["needs_human_review"] is True and r["decision"].startswith("CNN not confident enough to break the tie")
+    assert r["cnn_tie"] == {"label": cnn, "confidence": 0.5, "threshold": 0.70, "used": False}
+    assert r["agreement"] == "disagree" and r["cnn"]["confidence"] == 0.5          # shown, never merged
+    assert r["vision_model"]["label"] == C and r["vision_model_2"]["label"] == N
+
+
+def test_the_cutoff_itself_counts_as_confident():
+    from vision import thresholds
+    assert run(C, C, N, cnn_conf=thresholds.LOW_CONFIDENCE)["needs_human_review"] is False
+    assert run(C, C, N, cnn_conf=thresholds.LOW_CONFIDENCE - 0.001)["needs_human_review"] is True
+
+
+def test_tie_cnn_matches_neither_is_still_a_three_way_split_for_any_confidence():
+    for conf in (0.1, 0.9, 1.0):
+        r = run(B, C, N, cnn_conf=conf)
+        assert (r["needs_human_review"], r["decision"], r["cnn_tie"]) == (True, "3-way split", None)
+
+
+def test_agreeing_vision_models_are_unchanged_by_the_cnn_confidence():
+    for conf in (0.05, 0.69, 0.95):
+        r = run(B, C, C, cnn_conf=conf)
+        assert (r["needs_human_review"], r["answer"]["label"], r["cnn_dissent"]["trust"]) == (False, C, "low")
+
+
+def test_the_cutoff_is_read_from_its_single_home_not_repeated(monkeypatch):
+    import inspect
+    from vision import defect_detector, thresholds
+    assert defect_detector.LOW_CONFIDENCE is thresholds.LOW_CONFIDENCE or defect_detector.LOW_CONFIDENCE == thresholds.LOW_CONFIDENCE
+    source = inspect.getsource(dd._decide_vision_primary) + inspect.getsource(dd._low_confidence)
+    assert "0.7" not in source and "0.70" not in source           # no second copy of the number in the rule
+    monkeypatch.setattr(thresholds, "LOW_CONFIDENCE", 0.4)        # change it in ONE place ...
+    assert run(C, C, N, cnn_conf=0.5)["needs_human_review"] is False   # ... and the rule follows
+
+
+def test_unknown_cnn_confidence_does_not_break_a_tie():
+    assert dd.decide_labels("vision_primary", C, C, N)["status"] == "review"            # no confidence given
+    assert dd.decide_labels("vision_primary", C, C, N, 0.9)["label"] == C
 
 
 def test_three_way_split_needs_a_human_and_shows_every_vote():
@@ -68,6 +122,34 @@ def test_three_way_split_needs_a_human_and_shows_every_vote():
     assert set(r["votes"]) == {B, C, N} and r["suggestion"].startswith("no majority")
     assert r["answer"]["label"] == C and r["answer"]["from"] == "vision_model"  # the suggestion is a vision label
     assert [r[k]["confidence"] for k in ("cnn", "vision_model", "vision_model_2")] == [0.47, 0.95, 0.85]
+
+
+def test_endpoint_low_confidence_tie_is_a_review_with_the_cnn_tie_info(client, agent, monkeypatch):
+    monkeypatch.setattr(dd, "run_cnn", lambda p: det(C, 0.5))
+    monkeypatch.setattr(dd, "run_vision_model", lambda p: det(C, 0.95, "Flash"))
+    monkeypatch.setattr(dd, "run_vision_model_2", lambda p: det(N, 0.85, "Gemma"))
+    d = client.post(f"/cases/{_case(client)}/analyze").json()["dual_detector"]
+    assert d["needs_human_review"] is True and d["cnn_tie"]["confidence"] == 0.5
+    assert agent.calls[0]["needs_human_review"] is True and agent.calls[0]["detectors"]["cnn_tie"]["threshold"] == 0.70
+
+
+def test_real_agent_explains_that_the_cnn_was_not_confident_enough(monkeypatch):
+    real = _real_agent(monkeypatch, lambda q: pytest.fail("the LLM must not run on a review"))
+    report = {"defect_type": "corrosion", "location": "plate", "confidence": 0.95, "needs_human_review": True,
+              "detectors": {"decision": "CNN not confident enough to break the tie between the vision models",
+                            "suggestion": "2 of 3 say corrosion",
+                            "cnn_tie": {"label": C, "confidence": 0.5, "threshold": 0.70, "used": False},
+                            "cnn": {"label": C, "confidence": 0.5},
+                            "vision_model": {"name": "Flash", "label": C, "confidence": 0.95},
+                            "vision_model_2": {"name": "Gemma", "label": N, "confidence": 0.85}}}
+    d = real.diagnose(report)
+    ex = d["explanation"]
+    assert ex.startswith("UNVERIFIED") and d["raw"]["needs_manual_verification"] is True
+    for text in ("not confident enough to break the tie", "CNN says corrosion with confidence 0.5", "0.7 cut-off",
+                 "Flash says corrosion (confidence 0.95)", "Gemma says normal (confidence 0.85)", "a person must decide"):
+        assert text in ex
+    for name in ("core", "agent"):
+        sys.modules.pop(name, None)
 
 
 def test_vision_models_disagree_and_no_cnn_is_a_review():

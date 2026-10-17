@@ -282,7 +282,9 @@ def test_photos_and_saved_answers_are_git_ignored():
 def test_scheme_V_rules():
     assert vc.decide("V", L(N, C, C)) ["label"] == C and vc.decide("V", L(N, C, C))["dissent"] is True
     assert vc.decide("V", L(C, C, C))["dissent"] is False
-    assert vc.decide("V", L(N, C, N))["label"] == N            # the CNN breaks the tie
+    assert vc.decide("V", L(N, C, N), cnn_conf=0.9)["label"] == N            # a confident CNN breaks the tie
+    assert vc.decide("V", L(N, C, N), cnn_conf=0.5)["status"] == "review"    # ... a hesitant one does not
+    assert vc.decide("V", L(N, C, N))["status"] == "review"
     assert vc.decide("V", L(B, C, N))["reason"] == "3-way split"
     assert vc.decide("V", L(N, C, None))["status"] == "review"  # one vision model failed, the other disagrees with the CNN
     assert vc.decide("V", L(C, C, None))["label"] == C
@@ -359,3 +361,13 @@ def test_workers_still_retries_a_rate_limited_answer_once(photos):
     assert state["calls"].count(("Gemma-4-31B-IT", "p3.png")) == 2
     saved = {i["file"]: i for i in json.loads(answers.read_text())["images"]}
     assert saved["p3.png"]["answers"]["gemma"]["error"] is None
+
+
+def test_scheme_V_low_confidence_tie_rule_in_the_replay():
+    ok = img(C, C, C, N)                      # vision models disagree, the CNN matches Flash with confidence 0.9
+    shaky = img(C, C, C, N)
+    shaky["answers"]["cnn"]["confidence"] = 0.4
+    assert vc.score([ok], "V")["auto_correct"] == 1
+    s = vc.score([shaky], "V")
+    assert (s["auto_correct"], s["silent_wrong"], s["review"]) == (0, 0, 1)
+    assert "CNN not confident enough" in vc.per_photo([shaky], "V")

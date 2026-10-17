@@ -129,6 +129,16 @@ def prepare_image_for_vision(path: str) -> tuple:
 MODES = ("pair", "unanimous", "vote", "cnn_anchored", "vision_primary")
 
 
+def _low_confidence() -> float:
+    """The CNN's cut-off for "a person should verify visually", read from its single home (vision/thresholds.py)
+    at call time. Never repeated here as a number."""
+    repo_root = str(Path(__file__).resolve().parents[2])
+    if repo_root not in sys.path:
+        sys.path.insert(0, repo_root)
+    from vision import thresholds
+    return thresholds.LOW_CONFIDENCE
+
+
 def mode() -> str:
     """DUAL_MODE, default `pair`. An unknown value falls back to `pair` (never breaks the app)."""
     m = os.getenv("DUAL_MODE", "pair").strip().lower()
@@ -216,12 +226,13 @@ def _call_vision(path: str, model: str) -> dict:
 
 # ---------------- the rules (labels only) ----------------
 
-def decide_labels(dual_mode: str, cnn: Optional[str], v1: Optional[str], v2: Optional[str] = None) -> dict:
+def decide_labels(dual_mode: str, cnn: Optional[str], v1: Optional[str], v2: Optional[str] = None,
+                  cnn_conf: Optional[float] = None) -> dict:
     """Apply a mode's rule to the labels the detectors gave (None = missing).
     Returns {"status": "auto"|"review", "label", "reason", "ref"}. `label` is the automatic answer (None on review);
     `ref` is what a review is judged against: the CNN's label if it answered, else the leading label."""
     if dual_mode == "vision_primary":
-        return _decide_vision_primary(cnn, v1, v2)
+        return _decide_vision_primary(cnn, v1, v2, cnn_conf)
     pairs = [("cnn", cnn), ("v1", v1)] + ([("v2", v2)] if dual_mode != "pair" else [])
     present = [(k, l) for k, l in pairs if l]
     names = [l for _, l in present]
@@ -247,7 +258,7 @@ def decide_labels(dual_mode: str, cnn: Optional[str], v1: Optional[str], v2: Opt
     return out("auto", top, "unanimous" if count == 3 else "2-of-3")
 
 
-def _decide_vision_primary(cnn, v1, v2) -> dict:
+def _decide_vision_primary(cnn, v1, v2, cnn_conf=None) -> dict:
     """The vision models decide, the CNN is advisory. Extra keys: `dissent` (the CNN disagreed with an automatic
     answer and is only noted) and `missing_vision` (which vision models gave no answer)."""
     missing = [k for k, v in (("vision_model", v1), ("vision_model_2", v2)) if not v]
@@ -260,7 +271,10 @@ def _decide_vision_primary(cnn, v1, v2) -> dict:
         if v1 == v2:
             return out("auto", v1, "vision models agree", dissent=bool(cnn and cnn != v1))
         if cnn in (v1, v2):
-            return out("auto", cnn, "CNN breaks the tie between the vision models")
+            # the CNN may break the tie only when it is itself confident (at or above its own cut-off)
+            if cnn_conf is not None and cnn_conf >= _low_confidence():
+                return out("auto", cnn, "CNN breaks the tie between the vision models")
+            return out("review", None, "CNN not confident enough to break the tie between the vision models")
         if cnn is None:
             return out("review", None, "vision models disagree (no CNN to break the tie)")
         return out("review", None, "3-way split")
@@ -313,7 +327,7 @@ def combine(dual_mode: str, cnn: Optional[dict], vlm: Optional[dict], vlm2: Opti
     present = [(k, a) for k, a in answers if a is not None]
     names = [a["label"] for _, a in present]
     d = decide_labels(dual_mode, cnn["label"] if cnn else None, vlm["label"] if vlm else None,
-                      vlm2["label"] if vlm2 else None)
+                      vlm2["label"] if vlm2 else None, cnn["confidence"] if cnn else None)
     votes, suggestion = _votes_text(names)
     primary = dual_mode == "vision_primary"
     lead = d["label"] or (cnn["label"] if cnn else Counter(names).most_common(1)[0][0])
@@ -331,6 +345,9 @@ def combine(dual_mode: str, cnn: Optional[dict], vlm: Optional[dict], vlm2: Opti
     warnings = [f"{out[k]['name']} failed ({out[k].get('error')})" for k in d.get("missing_vision", [])]
     if primary and d["reason"].startswith("both vision models failed"):
         warnings.append("Both vision models failed: only the CNN answered, and it is low trust on real photos.")
+    cnn_tie = None
+    if primary and d["reason"].startswith("CNN not confident enough"):
+        cnn_tie = {"label": cnn["label"], "confidence": cnn["confidence"], "threshold": _low_confidence(), "used": False}
     dissent = None
     if d.get("dissent"):
         dissent = {"label": cnn["label"], "confidence": cnn["confidence"], "trust": "low",
@@ -354,7 +371,7 @@ def combine(dual_mode: str, cnn: Optional[dict], vlm: Optional[dict], vlm2: Opti
     out.update(
         agreement=agreement, needs_human_review=review, decision=d["reason"], votes=votes, suggestion=suggestion,
         answer={"label": lead, "confidence": owner.get("confidence"), "from": owner_key},
-        warnings=warnings, cnn_dissent=dissent,
+        warnings=warnings, cnn_dissent=dissent, cnn_tie=cnn_tie,
         models_answered=["CNN" if k == "cnn" else out[k]["name"] for k, _ in present], note=note)
     return out
 

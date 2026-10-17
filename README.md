@@ -87,7 +87,7 @@ whether it is on, the mode and the models.
 | `unanimous` | CNN + both vision models | Automatic only if everyone agrees. Any disagreement: a person checks. |
 | `vote` | the same three | Two out of three win automatically. All three different: a person checks. |
 | `cnn_anchored` | the same three | Like `vote`, but if the two vision models agree with each other and outvote the CNN, a person checks instead of the vote deciding silently. |
-| `vision_primary` (**demo setting**) | the same three | The two vision models decide and the CNN is only advisory (it was trained on drawings and is weak on real photos). They agree: that label wins, and a disagreeing CNN is shown as a low-trust "CNN dissent" note, not a review. They disagree: the CNN breaks the tie if it matches one of them, otherwise a person checks. If a vision model fails, the other one plus the CNN decide (a person checks a disagreement); if both fail, a person verifies. |
+| `vision_primary` (**demo setting**) | the same three | The two vision models decide and the CNN is only advisory (it was trained on drawings and is weak on real photos). They agree: that label wins, and a disagreeing CNN is shown as a low-trust "CNN dissent" note, not a review. They disagree: the CNN breaks the tie if it matches one of them *and* is at least 70% confident (its own "a person should verify" cut-off), otherwise a person checks. If a vision model fails, the other one plus the CNN decide (a person checks a disagreement); if both fail, a person verifies. |
 
 If one detector is missing, the other two must agree; if two are missing, the last one answers alone. The second vision
 model is `DUAL_VISION_MODEL_2` (default Gemma-4-31B-IT) and is only called by the three modes that need a third detector,

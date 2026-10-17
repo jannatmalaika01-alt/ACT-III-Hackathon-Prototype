@@ -17,8 +17,8 @@ from PIL import Image
 from .labels import CLASSES, NORMAL, to_contract_label
 from .model import DefectCNN
 from .preprocess import to_array
+from .thresholds import LOW_CONFIDENCE  # noqa: F401  (re-exported; defined once in thresholds.py)
 
-LOW_CONFIDENCE = 0.70
 _HERE = os.path.dirname(os.path.abspath(__file__))
 DEFAULT_WEIGHTS = os.path.join(_HERE, "weights", "defect_cnn.pt")
 

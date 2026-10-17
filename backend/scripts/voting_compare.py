@@ -66,7 +66,7 @@ DECISION_RULE = """Decision rule (written BEFORE any real-photo result; rule (b)
 
 # ---------------- the voting rules (the app's own) ----------------
 
-def decide(scheme: str, labels: dict) -> dict:
+def decide(scheme: str, labels: dict, cnn_conf=None) -> dict:
     """labels = {"cnn": label|None, "flash": label|None, "gemma": label|None}.
     Returns {"status": "auto"|"review", "label": label or None, "reason": str, "ref": label or None}.
     `ref` is the label used to judge a review: the CNN's label if it answered, else the leading label."""
@@ -79,7 +79,7 @@ def decide(scheme: str, labels: dict) -> dict:
         return dd.decide_labels("pair", cnn, flash)
     if scheme == "A_gemma":
         return dd.decide_labels("pair", cnn, gemma)
-    return dd.decide_labels(MODE_OF[scheme], cnn, flash, gemma)
+    return dd.decide_labels(MODE_OF[scheme], cnn, flash, gemma, cnn_conf)
 
 
 # ---------------- scoring ----------------
@@ -91,7 +91,7 @@ def score(images: list, scheme_key: str) -> dict:
     lats = []
     for im in images:
         labels = {d: _label(im["answers"].get(d)) for d in DETECTORS}
-        r = decide(scheme_key, labels)
+        r = decide(scheme_key, labels, _conf(im, "cnn"))
         involved = [im["answers"].get(d) for d in scheme[2] if im["answers"].get(d)]
         lats.append(max([a.get("latency") or 0.0 for a in involved] or [0.0]))
         truth = im["truth"]
@@ -115,6 +115,11 @@ def score(images: list, scheme_key: str) -> dict:
             "silent_wrong": c["silent_wrong"], "silent_outvote": c["silent_outvote"], "dissent_noted": c["dissent_noted"], "review": c["review"], "review_rate": c["review"] / n if n else 0.0,
             "false_alarm": c["false_alarm"], "good_flag": c["good_flag"], "extra_calls": scheme[3],
             "lat_avg": sum(lats) / n if n else 0.0, "lat_max": max(lats) if lats else 0.0}
+
+
+def _conf(im, det):
+    a = im["answers"].get(det)
+    return a.get("confidence") if a else None
 
 
 def _label(a):
@@ -399,7 +404,7 @@ def per_photo(images: list, scheme_key: str) -> str:
     rows, wrong, confusion = [], 0, 0
     for im in images:
         labels = {d: _label(im["answers"].get(d)) for d in DETECTORS}
-        r = decide(scheme_key, labels)
+        r = decide(scheme_key, labels, _conf(im, "cnn"))
         def show(d):
             a = im["answers"].get(d)
             return (f"{labels[d]} ({a['confidence']:.2f})" if labels[d] and a.get("confidence") is not None

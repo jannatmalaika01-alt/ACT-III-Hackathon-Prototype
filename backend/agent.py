@@ -113,6 +113,11 @@ def _review_reason(defect: dict) -> str:
     parts = _detector_parts(d)
     votes = f" Votes: {d['suggestion']}." if d.get("suggestion") else ""
     warn = "".join(f" Warning: {w}" for w in (d.get("warnings") or []))
+    tie = d.get("cnn_tie")
+    if tie:
+        return ("The two vision models DISAGREE: " + "; ".join(p for p in parts if not p.startswith("CNN")) + ". The CNN matches one "
+                f"of them but was not confident enough to break the tie (CNN says {tie['label']} with confidence "
+                f"{tie['confidence']}, below its {tie['threshold']} cut-off), so a person must decide." + votes + warn)
     if str(d.get("decision") or "").startswith("both vision models failed"):
         return ("BOTH VISION MODELS FAILED, so only the CNN answered (low trust: it was trained on drawings and is weak "
                 "on real photos): " + "; ".join(parts) + "." + warn)
