@@ -38,6 +38,8 @@ export interface Case {
   evolus_task_id: string | null;
   task_error: string | null;
   task_attempts: number;
+  // Only on GET /cases/{id}: is an Evolus run in progress for this case right now? (EVOLUS_MODE=rest runs it in the background)
+  evolus?: { running: boolean; started_at: string | null; execution_id: string | null };
   created_at: string;
   updated_at: string;
   // Only present on GET /cases/{id}
@@ -52,6 +54,9 @@ export const hasDiagnosis = (c: Case) => !!c.defect;
 // Same rule as REQUIRED_FOR_APPROVAL in backend/app/service.py
 export const missingForApproval = (c: Case) =>
   (["defect", "recommended_action", "source_manual", "source_page"] as const).filter((k) => !c[k]);
+
+// True while the Evolus agent is preparing the task: the backend says so, and a case that is "approved" but has no task yet is waiting too.
+export const evolusInProgress = (c: Case) => !!c.evolus?.running || c.status === "approved";
 
 export const shortId = (id: string) => id.slice(0, 8);
 

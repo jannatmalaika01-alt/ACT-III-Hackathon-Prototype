@@ -5,12 +5,13 @@ import { useCallback, useEffect, useState } from "react";
 import { ArrowLeft, BookOpen, Check, Code2, Copy, ExternalLink, FileText, History, Loader2, RotateCcw, X } from "lucide-react";
 import Shell from "@/components/Shell";
 import Pipeline from "@/components/Pipeline";
+import EvolusProgress from "@/components/EvolusProgress";
 import { useToast } from "@/components/Toast";
 import { ConfidenceRing, SeverityBadge, StatusBadge } from "@/components/Badges";
 import { approveCase, fileUrl, getCase, rejectCase, retryTask } from "@/lib/api";
 import { getUser } from "@/lib/auth";
 import { EVOLUS_URL, IS_MOCK } from "@/lib/config";
-import { hasDiagnosis, inputKind, LOW_CONFIDENCE, missingForApproval, shortId, type Case } from "@/lib/types";
+import { evolusInProgress, hasDiagnosis, inputKind, LOW_CONFIDENCE, missingForApproval, shortId, type Case } from "@/lib/types";
 
 export default function CasePage() {
   const { id } = useParams<{ id: string }>();
@@ -35,6 +36,15 @@ export default function CasePage() {
     return () => clearInterval(t);
   }, [awaiting, load]);
 
+  // The Evolus agent can take minutes. The server runs it in the background, so approving returns at once; we just keep
+  // checking until the task exists or the run ends (the rest of the page stays usable meanwhile).
+  const evolusBusy = c ? evolusInProgress(c) : false;
+  useEffect(() => {
+    if (!evolusBusy) return;
+    const t = setInterval(load, 3000);
+    return () => clearInterval(t);
+  }, [evolusBusy, load]);
+
   async function act(kind: "approve" | "reject" | "retry") {
     setBusy(true);
     const by = getUser() ?? "unknown";
@@ -44,7 +54,10 @@ export default function CasePage() {
         toast("info", "Case rejected");
       } else {
         const r = kind === "approve" ? await approveCase(id, by) : await retryTask(id);
-        if (r.status === "task_failed") toast("error", "Approval saved, but the Evolus task failed. You can retry.");
+        if (r.status === "approved" || r.evolus?.running) toast("info", kind === "retry"
+          ? "Retrying. If the earlier Evolus run is still going, we pick it up where it left off."
+          : "Approved. The Evolus agent is preparing the maintenance task; this can take a few minutes.");
+        else if (r.status === "task_failed") toast("error", "Approval saved, but the Evolus task failed. You can retry.");
         else toast("success", `Evolus task created: ${r.evolus_task_id}`);
       }
       setRejecting(false);
@@ -72,6 +85,9 @@ export default function CasePage() {
   const canDecide = c.status === "pending" && diag;
   const isImage = c.content_type.startsWith("image/");
   const rejection = c.approvals?.find((a) => a.decision === "rejected");
+  // when the Evolus step began: from the server, else from the "approved" event (so a reload still shows the right time)
+  const evolusSince = c.evolus?.started_at ?? c.events?.find((e) => e.to_status === "approved")?.created_at ?? null;
+  const timedOut = (c.task_error ?? "").includes("did not finish");
   const analysisError = [...(c.events ?? [])].reverse().find((e) => e.note?.startsWith("analysis failed"))?.note;
 
   return (
@@ -200,13 +216,19 @@ export default function CasePage() {
               </div>
             )}
 
-            {c.status === "task_failed" && (
+            {evolusBusy && <EvolusProgress since={evolusSince} />}
+
+            {c.status === "task_failed" && !evolusBusy && (
               <div className="space-y-3 rounded-lg border border-orange-400/30 bg-orange-400/10 p-3 text-sm text-orange-200">
-                <p>Your approval is saved, but the Evolus task failed (attempts: {c.task_attempts}).</p>
-                <p className="text-xs text-orange-300/80">{c.task_error}</p>
+                <p>
+                  {timedOut
+                    ? "Evolus is taking longer than expected. Your approval is saved and the run may still finish; Retry picks it up where it left off."
+                    : "Your approval is saved, but the Evolus task could not be created this time. You can try again."}
+                </p>
+                <p className="text-xs text-orange-300/70">Attempts: {c.task_attempts}. {c.task_error}</p>
                 <button disabled={busy} onClick={() => act("retry")}
                   className="flex w-full items-center justify-center gap-2 rounded-lg bg-orange-500 py-2 text-sm font-semibold text-slate-950 hover:bg-orange-400 disabled:opacity-50">
-                  <RotateCcw className="h-4 w-4" /> {busy ? "Retrying..." : "Retry task"}
+                  <RotateCcw className="h-4 w-4" /> {busy ? "Retrying..." : "Retry"}
                 </button>
               </div>
             )}
