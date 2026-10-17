@@ -109,6 +109,8 @@ because the shared endpoints have no embedding model.
 2. **An automation workflow**: `Start -> Ask an agent -> Automation output`.
 3. **An API call**: the backend starts the workflow with `POST .../workflows/{id}/execute`, then polls `GET .../executions/{id}` until the answer is ready, parses it
    (defect, severity, probable cause, safety precautions, recommended steps, citation, confidence, needs human review, summary) and stores it on the case.
+   **Every quoted passage is then checked against our own manuals**: it is marked *verified*, *corrected to the manual's exact wording* (the agent sometimes changes a spelling), or
+   *unverified*, and an unverified quote sets the human-review flag.
 
 The verified request and response shapes, measured timings, the retry-resumes-the-run behaviour and the execution id of a live end-to-end run are in
 **[`docs/evolus_integration.md`](docs/evolus_integration.md)**.
@@ -223,6 +225,8 @@ claimed once per case and its run id is kept, so an approval is never lost or du
 ## Screenshots
 
 Current build: [an UNVERIFIED case](docs/screenshots/09-unverified-needs-review.png) (no single defect is named, every candidate and who proposed it, the CNN as an advisory note) and [the Evolus agent's result card](docs/screenshots/10-evolus-agent-result.png) (severity, safety precautions, steps, citations with page and quote, task id, how long the agent took; this one shows the reply of a real Evolus run replayed by a local stand-in server, so its task id is not a real one).
+
+[The citation check](docs/screenshots/11-evolus-citation-check.png): each quote the Evolus agent gives is looked up in our manuals and marked verified, corrected to source (the manual's exact wording replaces the agent's) or unverified (red warning, human review). The agent's reply here is a test reply with one exact, one respelled and one invented quote.
 
 Earlier build (the layout is similar):
 

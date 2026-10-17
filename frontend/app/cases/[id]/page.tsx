@@ -128,6 +128,13 @@ export default function CasePage() {
         </div>
       )}
 
+      {(evolusAnswer?.citation_check?.unverified ?? 0) > 0 && (
+        <div className="mb-4 rounded-lg border border-red-400/40 bg-red-400/10 p-3 text-sm text-red-200" data-testid="evolus-citation-banner">
+          ⚠ The Evolus answer cites {evolusAnswer!.citation_check!.unverified === 1 ? "a quote" : `${evolusAnswer!.citation_check!.unverified} quotes`} that
+          could not be found in our manuals, so it needs a human check before anyone acts on it.
+        </div>
+      )}
+
       {/* Use this panel to debug: compare it with the Case type in lib/types.ts */}
       {showJson && (
         <div className="card animate-fade-up relative mb-4 p-4">

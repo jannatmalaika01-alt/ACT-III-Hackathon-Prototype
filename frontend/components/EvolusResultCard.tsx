@@ -1,10 +1,24 @@
-import { AlertTriangle, Check, ExternalLink } from "lucide-react";
+import { AlertTriangle, Check, ExternalLink, Pencil } from "lucide-react";
 import { SeverityBadge } from "@/components/Badges";
 import { duration, evolusSeconds, parseCitation, pct } from "@/lib/detectors";
-import type { EvolusResult, Severity } from "@/lib/types";
+import type { EvolusResult, Severity, VerifiedCitation } from "@/lib/types";
 
 const pill = "inline-flex items-center gap-1 rounded-full border px-2.5 py-0.5 text-xs font-medium";
 const SEVERITIES = ["low", "medium", "high", "critical"];
+
+const STATUS: Record<VerifiedCitation["status"], { label: string; cls: string }> = {
+  verified: { label: "verified", cls: "border-emerald-400/30 bg-emerald-400/10 text-emerald-300" },
+  corrected: { label: "corrected to source", cls: "border-sky-400/30 bg-sky-400/10 text-sky-300" },
+  unverified: { label: "unverified", cls: "border-red-400/40 bg-red-400/10 text-red-300" },
+};
+
+/** Results stored before the citation check existed only have the agent's raw lines: show those, marked as unchecked. */
+function legacyCitations(raw: string[]): VerifiedCitation[] {
+  return raw.map((r) => {
+    const c = parseCitation(r);
+    return { document: c.document, page: c.page ? Number(c.page) : null, quote: c.quote, status: "unverified", raw: r, note: "not checked against our manuals" };
+  });
+}
 
 /** What the Evolus agent answered after the approval: severity, safety precautions, recommended steps, each citation
  *  (document, page, quote), its confidence, and whether it wants a person to look. */
@@ -13,6 +27,9 @@ export default function EvolusResultCard({ taskId, result, evolusUrl }: { taskId
   const seconds = evolusSeconds(result);
   const sev = (p.severity ?? "").toLowerCase();
   const confidence = p.confidence != null ? pct(p.confidence) : p.confidence_text ?? "not given";
+  const cites = result.citations ?? legacyCitations(p.citation);
+  const unverified = cites.filter((c) => c.status === "unverified").length;
+  const forcedByCheck = unverified > 0 && result.agent_needs_human_review === false;   // the agent said no review, our check says yes
   return (
     <section className="card animate-fade-up p-5" data-testid="evolus-result">
       <div className="mb-4 flex flex-wrap items-center gap-2">
@@ -33,7 +50,7 @@ export default function EvolusResultCard({ taskId, result, evolusUrl }: { taskId
         <span className="ml-2 text-slate-500">Confidence</span>
         <span className="font-medium text-slate-200">{confidence}</span>
         {p.needs_human_review ? (
-          <span className={`${pill} ml-2 border-amber-400/30 bg-amber-400/10 text-amber-300`}><AlertTriangle className="h-3 w-3" /> needs human review</span>
+          <span className={`${pill} ml-2 border-amber-400/30 bg-amber-400/10 text-amber-300`}><AlertTriangle className="h-3 w-3" /> needs human review{forcedByCheck ? " (citation check)" : ""}</span>
         ) : (
           <span className={`${pill} ml-2 border-emerald-400/30 bg-emerald-400/10 text-emerald-300`}><Check className="h-3 w-3" /> no human review needed</span>
         )}
@@ -55,19 +72,37 @@ export default function EvolusResultCard({ taskId, result, evolusUrl }: { taskId
           <ol className="list-decimal space-y-1 pl-5 text-sm text-slate-300">{p.recommended_steps.map((x, i) => <li key={i}>{x}</li>)}</ol>
         </div>
       )}
-      {p.citation.length > 0 && (
+      {unverified > 0 && (
+        <div className="mb-3 flex items-start gap-2 rounded-lg border border-red-400/40 bg-red-400/10 p-3 text-sm text-red-200" data-testid="citation-warning">
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
+          <span>
+            {unverified === 1 ? "1 quote" : `${unverified} quotes`} from the agent could not be found in our manuals. Do not rely on
+            {unverified === 1 ? " it" : " them"}: a person must check the answer against the manual before anyone acts on it.
+          </span>
+        </div>
+      )}
+      {cites.length > 0 && (
         <div className="mb-3">
-          <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400">Citations from the manuals library</h3>
+          <h3 className="mb-1.5 text-xs font-semibold uppercase tracking-wide text-slate-400">Citations, checked against our manuals</h3>
           <ul className="space-y-2">
-            {p.citation.map((raw, i) => {
-              const c = parseCitation(raw);
-              return (
-                <li key={i} className="rounded-lg border-l-2 border-cyan-400/60 bg-white/5 p-3 text-sm" data-testid="evolus-citation">
-                  <div className="text-cyan-300">{c.document ? <>{c.document}{c.page && <> · page {c.page}</>}</> : c.raw}</div>
-                  {c.quote && <blockquote className="mt-1 text-xs italic text-slate-300">“{c.quote}”</blockquote>}
-                </li>
-              );
-            })}
+            {cites.map((c, i) => (
+              <li key={i} className={`rounded-lg border-l-2 bg-white/5 p-3 text-sm ${c.status === "unverified" ? "border-red-400/70" : "border-cyan-400/60"}`}
+                  data-testid="evolus-citation" data-status={c.status}>
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="text-cyan-300">{c.document ? <>{c.document}{c.page != null && <> · page {c.page}</>}</> : c.raw}</span>
+                  <span className={`${pill} text-[11px] ${STATUS[c.status].cls}`} data-testid="citation-status">
+                    {c.status === "verified" ? <Check className="h-3 w-3" /> : c.status === "corrected" ? <Pencil className="h-3 w-3" /> : <AlertTriangle className="h-3 w-3" />}
+                    {STATUS[c.status].label}
+                  </span>
+                </div>
+                {c.quote && <blockquote className={`mt-1 text-xs italic ${c.status === "unverified" ? "text-red-200/90" : "text-slate-300"}`}>“{c.quote}”</blockquote>}
+                {c.status === "corrected" && c.agent_quote && (
+                  <p className="mt-1 text-[11px] text-slate-500">The agent wrote: “{c.agent_quote}” The quote above is the manual&apos;s exact text.</p>
+                )}
+                {c.claimed && c.note && <p className="mt-1 text-[11px] text-slate-500">{c.note}.</p>}
+                {c.status === "unverified" && c.note && <p className="mt-1 text-[11px] text-red-300/80">{c.note}.</p>}
+              </li>
+            ))}
           </ul>
         </div>
       )}

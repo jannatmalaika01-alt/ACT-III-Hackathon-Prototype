@@ -43,6 +43,19 @@ export interface DualDetector {
   cnn_tie?: { label: string; confidence: number | null; threshold: number; used: boolean } | null;
 }
 
+// One citation of the Evolus agent after the backend checked its quote against our manuals (backend/app/citations.py).
+export interface VerifiedCitation {
+  document: string | null;            // the real file name of the manual (.pdf), not the agent's .txt
+  page: number | null;
+  quote: string | null;               // for "corrected" this is the manual's exact wording
+  status: "verified" | "corrected" | "unverified";
+  similarity?: number;
+  agent_quote?: string;               // what the agent wrote, kept when it was corrected
+  claimed?: { document: string | null; page: number | null };   // set when the text was found somewhere other than where the agent said
+  note?: string;
+  raw?: string;
+}
+
 // The Evolus agent's reply, parsed by the backend (backend/app/evolus.py parse_agent_reply), in diagnosis_raw.evolus.
 export interface EvolusResult {
   execution_id: string;
@@ -61,6 +74,9 @@ export interface EvolusResult {
     summary: string | null;
   };
   notes: string[];
+  citations?: VerifiedCitation[];     // the agent's citations after the check; absent on results stored before the check existed
+  citation_check?: { verified: number; corrected: number; unverified: number };
+  agent_needs_human_review?: boolean; // what the agent itself said; parsed.needs_human_review is also true when a quote is unverified
   duration_seconds?: number;
   evolus_seconds?: number | null;
   resumed?: boolean;

@@ -70,7 +70,7 @@ Manual cited by our pipeline: corrosion_control_guide.pdf, page 2
 - **Failures never crash the request.** A timeout, a `Failed` run, a 401/403/404, a refused start (409) or too many network errors raise `EvolusError`; the case becomes `task_failed` with the
   reason (and the id of the run that did not finish), and Retry resumes or restarts as described above.
 - **The answer is stored on the case** in `diagnosis_raw.evolus` (an existing JSON column, no database change): `raw_text` (always kept), `parsed` (the nine fields), `notes`, `execution_id`, `status`,
-  `resumed`, `previous_execution_id`, `duration_seconds` (this call) and `evolus_seconds` (Evolus's own clock, completedAt minus requestedAt). `safety_precautions`, `recommended_steps` and `citation` are lists;
+  `resumed`, `previous_execution_id`, `duration_seconds` (this call) and `evolus_seconds` (Evolus's own clock, completedAt minus requestedAt). `citations` (the checked citations, see below), `citation_check` (counts) and `agent_needs_human_review` (what the agent itself said). `safety_precautions`, `recommended_steps` and `citation` are lists;
   `confidence` is a number when the agent gave one and otherwise `None` with its words in `confidence_text` (the live agent said "high"); `needs_human_review` is a boolean (if the reply does not say, it defaults to `true`).
   The case's `evolus_task_id` is the execution id. `GET /cases/{id}` also returns `evolus: {running, started_at, execution_id}`.
 
@@ -82,6 +82,32 @@ Manual cited by our pipeline: corrosion_control_guide.pdf, page 2
 - **If the wait runs out** the card turns into a calm message: *"Evolus is taking longer than expected. Your approval is saved and the run may still finish; Retry picks it up where it left off."* with a **Retry** button (other
   failures say the task could not be created this time). Retry is hidden while a run is in progress.
 - Approving or retrying shows a short notice instead of waiting: *"Approved. The Evolus agent is preparing the maintenance task; this can take a few minutes."*
+
+## Citation check: every quote is looked up in our manuals
+
+The agent cites a document, a page and a quoted passage. It names the document `corrosion_control_guide.txt` where our file is `corrosion_control_guide.pdf`, and it sometimes changes a spelling inside a quote (for example
+"pressurized" for the manual's "pressurised"). So after parsing the reply, `backend/app/citations.py` checks **every quote** against the text of the manuals in the backend's retrieval index (`data/raw`, the same index the diagnosis uses).
+
+- **Where it looks:** the document with the same stem (`.txt` and `.pdf` count as the same) and the cited page first; then every other page of that document; then every page of every manual. If the text is somewhere other than
+  where the agent said, the real document and page are stored and the difference is noted.
+- **How it compares:** whitespace, case and punctuation are ignored. A quote can be an exact stretch of a page (after that), or a stretch of about the same length that is at least **0.9 similar** (character similarity, so a changed spelling or a missing or extra word still matches).
+- **Three results per citation:**
+
+| Status | Meaning | What is stored |
+|---|---|---|
+| `verified` | the quote is in the manual | the agent's quote, the real `.pdf` name and page |
+| `corrected` ("corrected to source") | no exact match but a passage is at least 0.9 similar | `quote` is REPLACED by the manual's exact text (punctuation included); the agent's wording is kept in `agent_quote` |
+| `unverified` | nothing is that close, or the citation has no quote at all | the agent's text is kept, `note` says why, and `similarity` is the closest match found (0 if nothing came close) |
+
+- **Human review:** if any quote is `unverified`, `parsed.needs_human_review` becomes `true` even when the agent said `false` (its own answer is kept in `agent_needs_human_review`), a note is added to the result, and the case's activity line says
+  "N citation(s) NOT verified against the manuals". `verified` and `corrected` citations do not change the agent's own flag. If the manuals cannot be loaded, every citation is left `unverified` (the check fails closed) and the task is still created.
+- **Stored on the case** in `diagnosis_raw.evolus.citations` (list of `{document, page, quote, status, similarity, agent_quote?, claimed?, note?, raw}`) with the counts in `citation_check`.
+- **On the case page** the Evolus result card lists each citation with its status label (verified / corrected to source / unverified), shows what the agent had written for a corrected one, and, if any quote is unverified, a red warning in the card, a banner at the top of the page and
+  "needs human review (citation check)" on the review label. Results stored before the check existed show their citations marked "not checked".
+- **Real data:** the three quotes of the live run above (`dbdee6ac-33ca-f111-bf5b-6045bd9ce552`) all come out `verified` against the real index (they are in the tests, together with the "pressurized" spelling, which comes out `corrected`, and an invented quote, which comes out `unverified`).
+
+What this does **not** do: it checks that the words exist in our manuals, not that the passage supports the agent's advice. A very short or generic quote can match somewhere by chance. The agent's library holds its own `.txt` versions of the manuals, so a re-flowed or edited
+version there could show up as `unverified` even though the advice is fine; the review flag is deliberately cautious. A quote that joins two separate places on a page will not match.
 
 ## Timings (measured, shared endpoint)
 
