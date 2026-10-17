@@ -15,7 +15,7 @@ from pydantic import BaseModel, Field, ValidationError
 from starlette.concurrency import run_in_threadpool
 
 from .config import Settings, get_settings
-from . import dual_detector
+from . import dual_detector, feedback as feedback_store
 from .db import InMemoryRepo, SupabaseRepo
 from .evolus import build_evolus_client
 from .models import ApproveIn, CaseStatus, DiagnosisIn, RejectIn, WebhookIn
@@ -209,6 +209,20 @@ def create_app(settings: Optional[Settings] = None, repo=None, evolus=None) -> F
             result = {**result, "raw": raw}
         return await run_in_threadpool(service.attach_diagnosis, str(case_id), DiagnosisIn(**result))
 
+    def _save_feedback(case_id: str, approved_by: str) -> None:
+        """A person approved this case: keep the photo + approved label for a later retrain. Never raises."""
+        try:
+            case = repo.get_case(case_id)
+            if not case or not (case.get("content_type") or "").startswith("image/"):
+                return
+            data = repo.download_file(case["file_path"])
+            if data is None:
+                cached = _find_cached(case_id)
+                data = cached.read_bytes() if cached else None
+            feedback_store.save_approved(case, data, approved_by)
+        except Exception:
+            log.exception("feedback save failed for case %s", case_id)
+
     # ---- routes ----
     @app.get("/health")
     def health():
@@ -332,7 +346,9 @@ def create_app(settings: Optional[Settings] = None, repo=None, evolus=None) -> F
     def approve_case(case_id: UUID, body: ApproveIn):
         # 200 even if the Evolus task failed: the approval itself succeeded.
         # Check the returned `status` ('task_created' or 'task_failed').
-        return service.approve(str(case_id), body)
+        result = service.approve(str(case_id), body)
+        _save_feedback(str(case_id), body.decided_by)
+        return result
 
     @app.post("/cases/{case_id}/reject")
     def reject_case(case_id: UUID, body: RejectIn):

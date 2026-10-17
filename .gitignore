@@ -9,3 +9,5 @@ venv/
 data/dual_lab/
 data/real_photos/
 data/voting_answers*.json
+data/feedback/
+vision/weights/candidate_cnn.*
