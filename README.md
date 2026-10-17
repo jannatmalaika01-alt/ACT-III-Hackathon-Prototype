@@ -45,7 +45,7 @@ The project combines a web-based factory dashboard, a backend API, computer visi
 | `TOKENFACTORY_BASE_URL`, `TOKENFACTORY_API_KEY`, `TOKENFACTORY_MODEL` | AMD Token Factory (the agent's LLM; model defaults to `MiMo-V2.6-Flash`) |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | database + file storage (or `USE_IN_MEMORY_DB=true` to run without) |
 | `WEBHOOK_SECRET` | signs Evolus status webhooks |
-| `EVOLUS_MODE` (`mock` default, or `rest`), `EVOLUS_API_KEY`, `EVOLUS_APPLICATION_ID`, `EVOLUS_WORKFLOW_ID` | real Evolus tasks |
+| `EVOLUS_MODE` (`mock` default, or `rest`), `EVOLUS_API_KEY`, `EVOLUS_APPLICATION_ID`, `EVOLUS_WORKFLOW_ID`, optional `EVOLUS_POLL_TIMEOUT` | real Evolus: approving a case runs the Evolus agent and waits for its answer (minutes); see `docs/evolus_integration.md` |
 | optional `GROQ_API_KEY`, `GEMINI_API_KEY`, `LOCAL_LLM_BASE_URL` | LLM fallbacks, tried in that order after Token Factory |
 
 **Docker:** `docker compose up --build` → frontend http://localhost:3000, API docs http://localhost:8000/docs.
