@@ -22,7 +22,7 @@ service is slow or down.
 You need [Docker](https://docs.docker.com/get-docker/) (Docker Desktop, or Docker Engine with Compose v2.24 or newer). Nothing else, and **no API keys**.
 
 ```bash
-git clone <this repository>
+git clone https://github.com/jannatmalaika01-alt/ACT-III-Hackathon-Prototype.git
 cd ACT-III-Hackathon-Prototype
 docker compose up --build
 ```
@@ -48,6 +48,8 @@ Ports already in use? `FRONTEND_PORT=3010 BACKEND_PORT=8010 docker compose up --
 | Recommendation text | an **offline template**: the manual's own "Action Required" step, labelled as a template (not an AI answer) | written by an AI model on AMD Token Factory (with a backup model) |
 | Database | in memory (data is lost on restart) | Supabase |
 | Evolus task | a fake id such as `MOCK-TASK-0001` | a real Evolus workflow run with the Evolus agent |
+
+Without keys the two vision models cannot vote, so a photo case may show "Unverified: needs human review" by design (the safety behaviour). Add a Token Factory key to `.env` to enable the full vote.
 
 ---
 
