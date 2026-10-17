@@ -14,7 +14,14 @@ from typing import List
 import numpy as np
 
 _TOKEN = re.compile(r"[a-z0-9#]+")
-_STOP = set("the a an and or of to in on is are be for with by at as it its this that from if any must should".split())
+_STOP = set("""the a an and or of to in on is are be for with by at as it its this that from if any must should
+how do does did what when which who whom why where i we you they he she can could would not no my our your their there here than then
+into over under after before between per about all each up out so too very also just me us""".split())
+
+
+def content_stems(text: str) -> set:
+    """Distinct meaningful word stems (stop words removed, 5-letter stems for long words)."""
+    return {(t[:5] if len(t) > 4 else t) for t in _TOKEN.findall(text.lower()) if t not in _STOP and len(t) > 1}
 
 
 def _tokens(text: str) -> List[str]:
