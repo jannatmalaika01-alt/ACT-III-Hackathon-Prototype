@@ -192,7 +192,9 @@ class CaseService:
             fields["diagnosis_raw"] = {**(case.get("diagnosis_raw") or {}), "evolus": result}
             note += (f" ({'resumed an earlier run; ' if result.get('resumed') else ''}agent answered in "
                      f"{result.get('evolus_seconds') or result.get('duration_seconds')} s; "
-                     f"needs_human_review={result['parsed']['needs_human_review']})")
+                     f"needs_human_review={result['parsed']['needs_human_review']}"
+                     + (f"; {result['citation_check']['unverified']} citation(s) NOT verified against the manuals"
+                        if (result.get("citation_check") or {}).get("unverified") else "") + ")")
         return self._move(case_id, current, CaseStatus.TASK_CREATED, fields, note=note)
 
     def _task_failed(self, case_id: str, current: CaseStatus, attempts: int, error: str,

@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Protocol
 
 import httpx
 
+from . import citations
 from .config import Settings
 
 
@@ -381,12 +382,29 @@ class RestEvolusClient:
         result = parse_agent_reply(text)
         if not text.strip():
             result["notes"].insert(0, "Evolus finished but returned no answer text")
+        self._check_citations(result)
         result.update(execution_id=execution_id, status=execution.get("status"), resumed=resumed,
                       previous_execution_id=previous, duration_seconds=round(_monotonic() - started, 1),
                       evolus_seconds=_evolus_seconds(execution))
         task = TaskId(execution_id)
         task.result = result
         return task
+
+    @staticmethod
+    def _check_citations(result: Dict[str, Any]) -> None:
+        """Look every quote of the agent up in our manuals (app/citations.py). A quote that is not in them makes the answer need a
+        person: the agent's own review flag is kept as `agent_needs_human_review`, and `parsed.needs_human_review` becomes true."""
+        parsed = result["parsed"]
+        cites = citations.verify_citations(parsed["citation"])
+        counts = citations.summarize(cites)
+        result.update(citations=cites, citation_check=counts, agent_needs_human_review=parsed["needs_human_review"])
+        if counts["unverified"]:
+            parsed["needs_human_review"] = True
+            result["notes"].append(f"{counts['unverified']} citation(s) could not be verified against our manuals: a person must check them")
+        if counts["corrected"]:
+            result["notes"].append(f"{counts['corrected']} quote(s) were corrected to the manual's exact wording")
+        if not cites:
+            result["notes"].append("the agent gave no citation")
 
     RUNNING = ("pending", "queued", "enqueued", "running", "processing", "inprogress", "waiting", "scheduled")
 

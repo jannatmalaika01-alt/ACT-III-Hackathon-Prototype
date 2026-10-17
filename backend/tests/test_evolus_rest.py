@@ -18,7 +18,8 @@ AGENT_REPLY = """**defect:** Corrosion on pipe flange
 **recommended_steps:**
 1. Inspect the flange face for pitting
 2. Replace the gasket and re-torque the bolts
-**citation:** corrosion_control_guide.pdf, page 2
+**citation:**
+- document: corrosion_control_guide.txt — section: Page 2: Rust & Oxidation Treatment — quote: "Scrape loose rust off using wire brush or sandblasting."
 **confidence:** 0.85
 **needs_human_review:** false
 **summary:** Moderate flange corrosion; repair at the next stop."""
