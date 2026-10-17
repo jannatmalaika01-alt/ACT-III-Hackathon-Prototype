@@ -92,16 +92,21 @@ def low_confidence(state: AgentState) -> dict:
     defect = state["defect_report"]
     top = state["retrieved_docs"][0]
     ref = f" (image {defect['image_ref']})" if defect.get("image_ref") else ""
+    if defect.get("needs_human_review"):
+        d = defect.get("detectors") or {}
+        cnn, vlm = d.get("cnn") or {}, d.get("vision_model") or {}
+        why = (f"The two detectors DISAGREE: CNN says {cnn.get('label')} (confidence {cnn.get('confidence')}), "
+               f"vision model {vlm.get('name') or ''} says {vlm.get('label')} (confidence {vlm.get('confidence')}). "
+               f"The confidences are from different models and are not combined.")
+    else:
+        why = (f"Detection confidence {defect['confidence']} is below the "
+               f"{LOW_CONFIDENCE_THRESHOLD} threshold, so this may be a false positive.")
     return {
         "needs_review": True,
         "diagnosis": {
             "defect": f"{defect['defect_type']} at {defect['location']}",
             "severity": "medium",
-            "explanation": (
-                f"UNVERIFIED DETECTION (severity is a placeholder, not assessed). "
-                f"Detection confidence {defect['confidence']} is below the "
-                f"{LOW_CONFIDENCE_THRESHOLD} threshold, so this may be a false positive."
-            ),
+            "explanation": f"UNVERIFIED DETECTION (severity is a placeholder, not assessed). {why}",
             "recommended_action": (
                 f"Manually verify the {defect['defect_type']} at {defect['location']}{ref} "
                 f"before taking any maintenance action."
@@ -202,7 +207,9 @@ def finalize(state: AgentState) -> dict:
 # ---------------- Routing ----------------
 
 def route_after_retrieve(state: AgentState) -> str:
-    if state["defect_report"]["confidence"] < LOW_CONFIDENCE_THRESHOLD:
+    report = state["defect_report"]
+    # dual detector: when the CNN and the vision model disagree, a human verifies before any action
+    if report.get("needs_human_review") or report["confidence"] < LOW_CONFIDENCE_THRESHOLD:
         return "low_confidence"
     return "reason"
 

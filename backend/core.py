@@ -146,13 +146,19 @@ def _use_schema(p: dict) -> bool:
     return _is_mimo(p["model"]) and os.getenv("TOKENFACTORY_JSON_SCHEMA", "").strip().lower() in ("1", "true", "yes")
 
 
+def _effort() -> str:
+    return os.getenv("TOKENFACTORY_REASONING_EFFORT", "low").strip() or "low"
+
+
 def _payload(p: dict, system: str, prompt: str, json_output: bool, max_tokens: int,
-             schema: bool = False) -> dict:
+             schema: bool = False, effort: str = None) -> dict:
     payload = {"model": p["model"], "temperature": 0.2,
                # exactly one system message, at index 0, text-only content
                "messages": [{"role": "system", "content": system}, {"role": "user", "content": prompt}]}
     if p["name"] == "tokenfactory":
-        payload["reasoning_effort"] = os.getenv("TOKENFACTORY_REASONING_EFFORT", "low").strip() or "low"
+        effort = _effort() if effort is None else effort
+        if effort != "omit":
+            payload["reasoning_effort"] = effort
         payload["max_tokens"] = max_tokens
         if json_output:
             payload["response_format"] = (
@@ -172,10 +178,17 @@ def _ask(p: dict, system: str, prompt: str, json_output: bool) -> tuple:
     max_tokens = TF_MAX_TOKENS
     schema = p["name"] == "tokenfactory" and json_output and _use_schema(p)
     cut_off_retried = False
-    for _ in range(3):  # extra passes: answer cut off by max_tokens, or the server refused the json_schema
+    efforts = [e for e in (_effort(), "low", "omit") if e]  # some models reject "none" (MiniCPM-V-4.7-1B)
+    efforts = list(dict.fromkeys(efforts))
+    for _ in range(6):  # extra passes: answer cut off by max_tokens, or the server refused the json_schema
         try:
-            r = _post_with_retries(p, _payload(p, system, prompt, json_output, max_tokens, schema))
+            r = _post_with_retries(p, _payload(p, system, prompt, json_output, max_tokens, schema, efforts[0]))
         except httpx.HTTPStatusError as exc:
+            detail = _error_detail(exc.response).lower()
+            if (p["name"] == "tokenfactory" and exc.response.status_code in (400, 422) and "reasoning" in detail
+                    and len(efforts) > 1):
+                efforts.pop(0)  # this model does not accept that reasoning_effort value: try the next one
+                continue
             if schema and exc.response.status_code == 400 and "schema" in _error_detail(exc.response).lower():
                 schema = False  # this model/server does not do json_schema: use json_object from now on
                 continue
