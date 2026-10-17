@@ -4,6 +4,7 @@ const BACKEND = process.env.BACKEND_URL ?? "http://localhost:8000";
 
 const config: NextConfig = {
   output: "standalone",
+  devIndicators: false,
   // Approving in EVOLUS_MODE=rest now returns at once (the Evolus agent runs in the background). This longer proxy timeout is a safety
   // net for EVOLUS_BACKGROUND=false, where the request waits for the agent.
   experimental: { proxyTimeout: 300_000 },
