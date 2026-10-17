@@ -16,6 +16,7 @@ Confidences are NEVER averaged or merged: each detector's own number is kept nex
 from __future__ import annotations
 
 import base64
+import io
 import json
 import logging
 import mimetypes
@@ -40,6 +41,32 @@ PROMPT = ("You are inspecting a photo of an industrial part for a factory qualit
 
 def enabled() -> bool:
     return os.getenv("DUAL_DETECTOR", "off").strip().lower() in ("on", "1", "true", "yes")
+
+
+MAX_VISION_SIDE = 1024   # longest side sent to a Token Factory vision model (the CNN still gets the original)
+JPEG_QUALITY = 85
+
+
+def prepare_image_for_vision(path: str) -> tuple:
+    """(bytes, mime) to send to a vision model: the photo downscaled so its longest side is at most
+    MAX_VISION_SIDE px (never upscaled), upright (EXIF rotation applied) and re-encoded as JPEG quality 85.
+    The original file is only read, never changed. If the file cannot be decoded as an image, the original
+    bytes are sent unchanged (the model will then refuse it and the detector counts as missing)."""
+    raw = Path(path).read_bytes()
+    try:
+        from PIL import Image, ImageOps
+        with Image.open(io.BytesIO(raw)) as im:
+            im = ImageOps.exif_transpose(im)
+            if im.mode != "RGB":
+                im = im.convert("RGB")
+            if max(im.size) > MAX_VISION_SIDE:
+                im.thumbnail((MAX_VISION_SIDE, MAX_VISION_SIDE), Image.LANCZOS)
+            out = io.BytesIO()
+            im.save(out, format="JPEG", quality=JPEG_QUALITY)
+            return out.getvalue(), "image/jpeg"
+    except Exception:
+        log.warning("could not resize %s for the vision model; sending the original bytes", Path(path).name)
+        return raw, mimetypes.guess_type(path)[0] or "image/png"
 
 
 MODES = ("pair", "unanimous", "vote", "cnn_anchored")
@@ -105,8 +132,8 @@ def _call_vision(path: str, model: str) -> dict:
     p = next((x for x in core._providers() if x["name"] == "tokenfactory"), None)
     if p is None or not p["key"]:
         raise RuntimeError("Token Factory is not configured")
-    mime = mimetypes.guess_type(path)[0] or "image/png"
-    data = base64.b64encode(Path(path).read_bytes()).decode()
+    image_bytes, mime = prepare_image_for_vision(path)  # downscaled copy; the CNN reads the original file itself
+    data = base64.b64encode(image_bytes).decode()
     payload = {
         "model": model, "temperature": 0.2, "max_tokens": 1500,
         "response_format": {"type": "json_object"},
