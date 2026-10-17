@@ -10,7 +10,7 @@ import DetectorVotes from "@/components/DetectorVotes";
 import EvolusResultCard from "@/components/EvolusResultCard";
 import { useToast } from "@/components/Toast";
 import { ConfidenceRing, SeverityBadge, StatusBadge } from "@/components/Badges";
-import { approveCase, fileUrl, getCase, rejectCase, retryTask } from "@/lib/api";
+import { analyzeCase, approveCase, fileUrl, getCase, rejectCase, retryTask } from "@/lib/api";
 import { getUser } from "@/lib/auth";
 import { answerSource, candidatesOf, dualOf, isUnverified, pct, pretty } from "@/lib/detectors";
 import { EVOLUS_URL, IS_MOCK } from "@/lib/config";
@@ -26,9 +26,23 @@ export default function CasePage() {
   const [reason, setReason] = useState("");
   const [showJson, setShowJson] = useState(false);
   const [imgOk, setImgOk] = useState(true);
+  // the raw json panel only shows when the url has ?debug
+  const debug = typeof window !== "undefined" && window.location.search.includes("debug");
 
-  const load = useCallback(() => getCase(id).then(setC).catch((e) => setError(e.message)), [id]);
+  const [lost, setLost] = useState(false);
+  const load = useCallback(
+    () => getCase(id).then((x) => { setC(x); setLost(false); })
+      .catch((e) => { setError(e.message); setLost(true); }),
+    [id]
+  );
   useEffect(() => { load(); }, [load]);
+
+  // keep trying while the backend is unreachable
+  useEffect(() => {
+    if (!lost) return;
+    const t = setInterval(load, 4000);
+    return () => clearInterval(t);
+  }, [lost, load]);
 
   // INTEGRATION(JANNAT, TITUS): the AI diagnosis is posted by the backend after upload.
   // Until it arrives the AI fields are empty, so we check again every 2 seconds.
@@ -48,7 +62,15 @@ export default function CasePage() {
     return () => clearInterval(t);
   }, [evolusBusy, load]);
 
+  const [retrying, setRetrying] = useState(false);
+  function reanalyse() {
+    setRetrying(true);
+    analyzeCase(id).catch((e: Error) => toast("error", `Analysis failed: ${e.message}`));
+    toast("info", "Analysis restarted");
+  }
+
   async function act(kind: "approve" | "reject" | "retry") {
+    if (kind === "approve" && !window.confirm("Approve this recommendation and create a maintenance task?")) return;
     setBusy(true);
     const by = getUser() ?? "unknown";
     try {
@@ -97,6 +119,8 @@ export default function CasePage() {
   const evolusSince = c.evolus?.started_at ?? c.events?.find((e) => e.to_status === "approved")?.created_at ?? null;
   const timedOut = (c.task_error ?? "").includes("did not finish");
   const analysisError = [...(c.events ?? [])].reverse().find((e) => e.note?.startsWith("analysis failed"))?.note;
+  // after "Try again" we hide the old error and show the spinner again
+  const analysisFailed = retrying ? undefined : analysisError;
 
   return (
     <Shell>
@@ -112,13 +136,21 @@ export default function CasePage() {
         {unverified
           ? <span className="inline-flex items-center rounded-full border border-amber-400/40 bg-amber-400/10 px-2.5 py-0.5 text-xs font-semibold text-amber-300">Unverified</span>
           : <SeverityBadge severity={c.severity} />}
-        <button onClick={() => setShowJson((v) => !v)}
-          className="ml-auto flex items-center gap-1.5 rounded-md border border-white/10 px-3 py-1.5 text-xs text-slate-300 hover:bg-white/5">
-          <Code2 className="h-3.5 w-3.5" /> Raw JSON
-        </button>
+        {debug && (
+          <button onClick={() => setShowJson((v) => !v)}
+            className="ml-auto flex items-center gap-1.5 rounded-md border border-white/10 px-3 py-1.5 text-xs text-slate-300 hover:bg-white/5">
+            <Code2 className="h-3.5 w-3.5" /> Raw JSON
+          </button>
+        )}
       </div>
 
       <div className="mb-4"><Pipeline c={c} /></div>
+
+      {lost && (
+        <div className="mb-4 rounded-lg border border-red-400/40 bg-red-400/10 p-3 text-sm text-red-200">
+          Lost connection to the backend. Trying again...
+        </div>
+      )}
 
       {(lowConf || missing.length > 0) && (
         <div className="mb-4 rounded-lg border border-amber-400/30 bg-amber-400/10 p-3 text-sm text-amber-200">
@@ -146,10 +178,16 @@ export default function CasePage() {
 
       {awaiting ? (
         <section className="card relative mb-4 overflow-hidden p-10 text-center">
-          {!analysisError && <div className="scan-line" />}
-          {!analysisError && <Loader2 className="mx-auto mb-3 h-8 w-8 animate-spin text-cyan-300" />}
-          <p className="font-medium">{analysisError ? "The AI could not analyse this file" : "The AI is analysing your file..."}</p>
-          <p className="mt-1 text-sm text-slate-400">{analysisError ?? "This page updates by itself."}</p>
+          {!analysisFailed && <div className="scan-line" />}
+          {!analysisFailed && <Loader2 className="mx-auto mb-3 h-8 w-8 animate-spin text-cyan-300" />}
+          <p className="font-medium">{analysisFailed ? "The AI could not analyse this file" : "The AI is analysing your file..."}</p>
+          <p className="mt-1 text-sm text-slate-400">{analysisFailed ?? "This page updates by itself."}</p>
+          {analysisFailed && (
+            <button onClick={reanalyse}
+              className="mt-4 rounded-lg bg-cyan-500 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-cyan-400">
+              Try again
+            </button>
+          )}
         </section>
       ) : (
         <div className="grid gap-4 lg:grid-cols-5">
