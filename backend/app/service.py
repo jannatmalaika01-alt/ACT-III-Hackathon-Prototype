@@ -124,9 +124,13 @@ class CaseService:
         except Exception as exc:  # anything unexpected must not lose the approval
             log.exception("unexpected error creating Evolus task for %s", case_id)
             return self._task_failed(case_id, current, attempts, f"unexpected error: {exc}")
-        return self._move(case_id, current, CaseStatus.TASK_CREATED,
-                          {"evolus_task_id": task_id, "task_error": None, "task_attempts": attempts},
-                          note=f"Evolus task {task_id} created")
+        fields = {"evolus_task_id": str(task_id), "task_error": None, "task_attempts": attempts}
+        note = f"Evolus task {task_id} created"
+        result = getattr(task_id, "result", None)  # REST mode: the agent's raw text and parsed fields
+        if result:
+            fields["diagnosis_raw"] = {**(case.get("diagnosis_raw") or {}), "evolus": result}
+            note += f" (agent answered in {result.get('duration_seconds')} s; needs_human_review={result['parsed']['needs_human_review']})"
+        return self._move(case_id, current, CaseStatus.TASK_CREATED, fields, note=note)
 
     def _task_failed(self, case_id: str, current: CaseStatus, attempts: int, error: str) -> Dict[str, Any]:
         return self._move(case_id, current, CaseStatus.TASK_FAILED,
