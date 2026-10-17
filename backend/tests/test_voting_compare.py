@@ -338,3 +338,24 @@ def test_replay_only_with_per_photo_and_baseline_makes_no_api_call(tmp_path, mon
     out = capsys.readouterr().out
     assert "Per photo, scheme V" in out and "Latency of the vision models, before and after" in out
     assert json.loads(old.read_text())["images"][0]["answers"]["cnn"]["label"] == C   # the baseline file is only read
+
+
+def test_workers_collects_all_photos_once_each_and_resumes(photos):
+    folder, state, _, answers = photos
+    assert vc.main(["--photos", str(folder), "--answers", str(answers), "--workers", "3", "--per-minute", "6000"]) == 0
+    assert sorted(state["calls"]) == sorted((m, n) for m in ("Qwen3.8-Flash-Next", "Gemma-4-31B-IT")
+                                            for n in ("p1.png", "p2.png", "p3.png"))
+    saved = json.loads(answers.read_text())["images"]
+    assert {i["file"] for i in saved} == {"p1.png", "p2.png", "p3.png"}
+    n = len(state["calls"])
+    vc.main(["--photos", str(folder), "--answers", str(answers), "--workers", "3", "--per-minute", "6000"])
+    assert len(state["calls"]) == n                       # resume: nothing is asked twice
+
+
+def test_workers_still_retries_a_rate_limited_answer_once(photos):
+    folder, state, _, answers = photos
+    state["rate_limit_once"].add(("Gemma-4-31B-IT", "p3.png"))
+    vc.main(["--photos", str(folder), "--answers", str(answers), "--workers", "2", "--per-minute", "6000"])
+    assert state["calls"].count(("Gemma-4-31B-IT", "p3.png")) == 2
+    saved = {i["file"]: i for i in json.loads(answers.read_text())["images"]}
+    assert saved["p3.png"]["answers"]["gemma"]["error"] is None

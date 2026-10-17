@@ -28,6 +28,7 @@ import csv
 import json
 import os
 import sys
+import threading
 import time
 from collections import Counter
 from pathlib import Path
@@ -262,13 +263,67 @@ def _ask(dd, model: str, path: str) -> dict:
         return {"label": None, "confidence": None, "latency": time.time() - start, "error": kind}
 
 
-def collect(folder: Path, labels: dict, answers_path: Path, flash_model: str, gemma_model: str, per_minute: float) -> list:
+class _Gate:
+    """Thread-safe rate gate for --workers > 1: at most `per_minute` requests start per minute, whichever thread asks."""
+
+    def __init__(self, per_minute: float):
+        self.gap, self.lock, self.next = 60.0 / per_minute, threading.Lock(), 0.0
+
+    def wait(self) -> None:
+        with self.lock:
+            now = time.time()
+            start = max(now, self.next)
+            self.next = start + self.gap
+        if start > now:
+            time.sleep(start - now)
+
+
+def _collect_parallel(dd, todo: list, folder: Path, models: dict, per_minute: float, workers: int, done_images: list,
+                      answers_path: Path) -> list:
+    from concurrent.futures import ThreadPoolExecutor
+    gate, lock, images = _Gate(per_minute), threading.Lock(), list(done_images)
+
+    def one(item):
+        name, truth = item
+        path = str(folder / name)
+        start = time.time()
+        try:
+            c = dd.run_cnn(path)
+            cnn = {"label": c["label"], "confidence": c["confidence"], "latency": time.time() - start, "error": None}
+        except Exception as exc:
+            cnn = {"label": None, "confidence": None, "latency": time.time() - start, "error": type(exc).__name__}
+        ans = {"cnn": cnn}
+        for det in ("flash", "gemma"):
+            gate.wait()
+            ans[det] = _ask(dd, models[det], path)
+        im = {"file": name, "truth": truth, "variant": "real", "answers": ans}
+        with lock:
+            images.append(im)
+            save_answers(answers_path, images, models)
+            print(f"  {name}: truth={truth} cnn={cnn['label']} flash={ans['flash']['label'] or ans['flash']['error']} "
+                  f"gemma={ans['gemma']['label'] or ans['gemma']['error']}", flush=True)
+
+    with ThreadPoolExecutor(workers) as ex:
+        list(ex.map(one, todo))
+    return images
+
+
+def collect(folder: Path, labels: dict, answers_path: Path, flash_model: str, gemma_model: str, per_minute: float,
+            workers: int = 1) -> list:
     import core  # noqa: F401  (loads backend/.env)
     from app import dual_detector as dd
 
     done = {im["file"]: im for im in (json.loads(answers_path.read_text())["images"] if answers_path.is_file() else [])}
     gap, models = 60.0 / per_minute, {"cnn": "CNN", "flash": flash_model, "gemma": gemma_model}
     images, first = [], True
+    if workers > 1:
+        ready = [im for n, t in sorted(labels.items()) for im in [done.get(n)]
+                 if im and im["truth"] == t and all(im["answers"].get(d) for d in DETECTORS)]
+        have = {im["file"] for im in ready}
+        todo = [(n, t) for n, t in sorted(labels.items()) if n not in have]
+        images = _collect_parallel(dd, todo, folder, models, per_minute, workers, ready, answers_path)
+        images.sort(key=lambda im: im["file"])
+        return _retry_rate_limited(dd, images, folder, models, per_minute, answers_path)
     for name, truth in sorted(labels.items()):
         im = done.get(name)
         if im and im["truth"] == truth and all(im["answers"].get(d) for d in DETECTORS):
@@ -291,7 +346,11 @@ def collect(folder: Path, labels: dict, answers_path: Path, flash_model: str, ge
         save_answers(answers_path, images, models)  # keep every raw answer, even if a later photo fails
         print(f"  {name}: truth={truth} cnn={cnn['label']} flash={ans['flash']['label'] or ans['flash']['error']} "
               f"gemma={ans['gemma']['label'] or ans['gemma']['error']}", flush=True)
-    # ONE retry for answers lost to a rate limit, slower
+    return _retry_rate_limited(dd, images, folder, models, per_minute, answers_path)
+
+
+def _retry_rate_limited(dd, images: list, folder: Path, models: dict, per_minute: float, answers_path: Path) -> list:
+    """ONE retry for answers lost to a rate limit, slower. Never a loop."""
     redo = [(im, d) for im in images for d in ("flash", "gemma") if im["answers"][d].get("error") == "rate_limit"]
     for im, det in redo:
         _sleep(60.0 / min(per_minute, 12))
@@ -389,6 +448,7 @@ def main(argv=None) -> int:
     ap.add_argument("--replay-only", action="store_true", help="re-score the saved answers, no API call")
     ap.add_argument("--answers", default=str(DEFAULT_ANSWERS), help="where Phase 2 saves the raw answers (git-ignored)")
     ap.add_argument("--per-minute", type=float, default=15.0)
+    ap.add_argument("--workers", type=int, default=1, help="photos processed at the same time (the per-minute cap still holds)")
     ap.add_argument("--flash-model", default=FLASH_MODEL)
     ap.add_argument("--gemma-model", default=GEMMA_MODEL)
     ap.add_argument("--skip-check", action="store_true", help="skip the check against the published synthetic numbers")
@@ -415,7 +475,7 @@ def main(argv=None) -> int:
         labels = read_labels(folder, Path(args.labels) if args.labels else folder / "labels.csv")
         print(f"{len(labels)} photos, {2 * len(labels)} vision requests at <= {args.per_minute:g}/min "
               f"(about {2 * len(labels) / args.per_minute:.1f} min). Raw answers are saved to {answers}\n", flush=True)
-        images = collect(folder, labels, answers, args.flash_model, args.gemma_model, args.per_minute)
+        images = collect(folder, labels, answers, args.flash_model, args.gemma_model, args.per_minute, args.workers)
     else:
         ap.error("choose one of --from-round1, --photos DIR, --replay-only")
     report = render(images)
