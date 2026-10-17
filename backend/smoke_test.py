@@ -45,11 +45,19 @@ def dual_detector_step(client):
         print(r.text[:500])
         return
     dual = r.json().get("dual_detector") or {}
-    cnn, vis = dual.get("cnn", {}), dual.get("vision_model", {})
+    print(f"mode               : {dual.get('mode')}")
     print(f"agreement          : {dual.get('agreement')}   (needs_human_review={dual.get('needs_human_review')})")
-    print(f"CNN                : {cnn.get('label')} ({cnn.get('confidence')}) {cnn.get('error') or ''}")
-    print(f"vision model       : {vis.get('name')} -> {vis.get('label')} ({vis.get('confidence')}) {vis.get('error') or ''}")
-    print(f"model that answered: {vis.get('model') or vis.get('name')}")
+    for key, who in (("cnn", "CNN"), ("vision_model", "vision model"), ("vision_model_2", "vision model 2")):
+        d = dual.get(key)
+        if d is not None:
+            name = f"{d['name']} " if d.get("name") else ""
+            print(f"{who:19}: {name}-> {d.get('label')} ({d.get('confidence')}) {d.get('error') or ''}")
+    print(f"votes              : {dual.get('suggestion')}")
+    if dual.get("cnn_dissent"):
+        print(f"CNN dissent (note) : {dual['cnn_dissent']['label']} ({dual['cnn_dissent']['confidence']}), low trust")
+    for w in dual.get("warnings") or []:
+        print(f"warning            : {w}")
+    print(f"models that answered: {', '.join(dual.get('models_answered') or [])}")
     print(f"total time         : {total:.1f}s")
 
 
