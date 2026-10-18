@@ -34,7 +34,11 @@ def main():
     args = ap.parse_args()
 
     ctype = CONTENT_TYPES.get(os.path.splitext(args.file)[1].lower()) or mimetypes.guess_type(args.file)[0] or "application/octet-stream"
-    with httpx.Client(base_url=args.api, timeout=120) as api:
+    with httpx.Client(
+        base_url=args.api,
+        timeout=120,
+        headers={"ngrok-skip-browser-warning": "true", "Accept": "application/json"},
+    ) as api:
         with open(args.file, "rb") as f:
             case = api.post("/cases", files={"file": (os.path.basename(args.file), f, ctype)}, data={"uploaded_by": args.uploaded_by})
         case.raise_for_status()

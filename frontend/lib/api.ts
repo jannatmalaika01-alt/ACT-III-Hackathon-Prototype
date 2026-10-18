@@ -6,7 +6,15 @@ const MOCK = process.env.NEXT_PUBLIC_USE_MOCK === "true";
 
 // The browser calls /api/backend/*. Next.js forwards it to BACKEND_URL (see next.config.ts).
 const BASE = "/api/backend";
-const JSON_HEADERS = { "Content-Type": "application/json" };
+const DEFAULT_HEADERS: Record<string, string> = {
+  "ngrok-skip-browser-warning": "true",
+  Accept: "application/json",
+};
+const JSON_HEADERS: Record<string, string> = {
+  "Content-Type": "application/json",
+  "ngrok-skip-browser-warning": "true",
+  Accept: "application/json",
+};
 
 // Routes in backend/app/main.py. If a route changes, change only the paths in this file.
 //   GET  /health
@@ -21,24 +29,56 @@ const JSON_HEADERS = { "Content-Type": "application/json" };
 // The diagnosis is posted by the AI pipeline (POST /cases/{id}/diagnosis), never by the frontend.
 
 async function http<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(`${BASE}${path}`, init);
+  const headers = new Headers(init?.headers);
+  if (!headers.has("ngrok-skip-browser-warning")) {
+    headers.set("ngrok-skip-browser-warning", "true");
+  }
+  if (!headers.has("Accept")) {
+    headers.set("Accept", "application/json");
+  }
+
+  const res = await fetch(`${BASE}${path}`, {
+    ...init,
+    headers,
+  });
+
   if (!res.ok) {
     // The backend sends {"detail": "..."} for clear errors and a list for validation errors.
     let msg = res.statusText;
     try {
-      const j = await res.json();
-      msg =
-        typeof j.detail === "string"
-          ? j.detail
-          : Array.isArray(j.detail)
-            ? j.detail.map((d: { msg?: string }) => d.msg).join(", ")
-            : JSON.stringify(j);
+      const text = await res.text();
+      try {
+        const j = JSON.parse(text);
+        msg =
+          typeof j.detail === "string"
+            ? j.detail
+            : Array.isArray(j.detail)
+              ? j.detail.map((d: { msg?: string }) => d.msg).join(", ")
+              : JSON.stringify(j);
+      } catch {
+        if (text.includes("<!DOCTYPE") || text.includes("<html")) {
+          msg = "Received HTML from upstream tunnel instead of JSON. Ensure ngrok-skip-browser-warning is active.";
+        } else if (text.trim()) {
+          msg = text.slice(0, 200);
+        }
+      }
     } catch {
-      /* response had no JSON body */
+      /* response had no readable body */
     }
     throw new Error(`${res.status}: ${msg}`);
   }
-  return res.json() as Promise<T>;
+
+  const text = await res.text();
+  try {
+    return JSON.parse(text) as T;
+  } catch (err) {
+    if (text.includes("<!DOCTYPE") || text.includes("<html")) {
+      throw new Error(
+        "Received HTML interstitial warning from Ngrok instead of valid JSON. Upstream Ngrok warning was not bypassed."
+      );
+    }
+    throw err;
+  }
 }
 
 export const fileUrl = (id: string) => `${BASE}/cases/${id}/file`;
@@ -57,7 +97,13 @@ export interface Health {
 export async function getHealth(): Promise<Health> {
   if (MOCK) return { state: "mock" };
   try {
-    const r = await fetch(`${BASE}/health`, { cache: "no-store" });
+    const r = await fetch(`${BASE}/health`, {
+      cache: "no-store",
+      headers: {
+        "ngrok-skip-browser-warning": "true",
+        Accept: "application/json",
+      },
+    });
     if (!r.ok) return { state: "offline" };
     return { ...(await r.json()), state: "online" };
   } catch {
